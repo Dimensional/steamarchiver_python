@@ -1,43 +1,58 @@
 #!/usr/bin/env python3
 from binascii import hexlify, unhexlify
-from os import path
+from os import path, makedirs
 from struct import iter_unpack, pack
 from sys import argv
+import glob
 
-class Chunkstore():
-    def __init__(self, filename, depot=None, is_encrypted=None):
-        filename = filename.replace(".csd","").replace(".csm","")
-        self.csmname = filename + ".csm"
-        self.csdname = filename + ".csd"
+class Chunkstore:
+    def __init__(self, filename, depot=None, is_encrypted=False, max_file_size=1 * 1024 * 1024 * 1024):
+        filename = filename.replace(".csd", "").replace(".csm", "")
+        self.base_filename = filename
+        self.depot = depot
+        self.is_encrypted = is_encrypted
+        self.max_file_size = max_file_size
+        self.file_index = 1
         self.chunks = {}
-        if path.exists(self.csdname) and path.exists(self.csmname):
+        self._load_existing_files()
+
+    def _load_existing_files(self):
+        csm_files = sorted(glob.glob(f"{self.base_filename}_*.csm"))
+        num_files = len(csm_files)
+        while self.file_index <= num_files:
+            self.csmname = f"{self.base_filename}_{self.file_index}.csm"
+            self.csdname = f"{self.base_filename}_{self.file_index}.csd"
+            print(f"Checking for file: {self.csmname}")  # Debug print
+            if not path.exists(self.csmname):
+                print(f"File does not exist: {self.csmname}")  # Debug print
+                break
             with open(self.csmname, "rb") as csmfile:
                 self.csm = csmfile.read()
                 if self.csm[:4] != b"SCFS":
-                    print("not a CSM file: " + (filename + ".csm"))
+                    print("Not a CSM file: " + self.csmname)
                     return False
                 self.depot = int.from_bytes(self.csm[0xc:0x10], byteorder='little', signed=False)
                 self.is_encrypted = (self.csm[0x8:0xa] == b'\x03\x00')
-                if is_encrypted != None and self.is_encrypted != is_encrypted:
-                    raise Exception("chunkstore " + self.csdname + " already exists and contains " + ("encrypted" if self.is_encrypted else "decrypted") + " chunks")
-                if depot != None and self.depot != depot:
-                    raise Exception("chunkstore " + self.csdname + " already exists and lists a different depot (" + str(self.depot) + " instead of " + str(depot) + ")")
-        elif depot != None and is_encrypted != None:
-            self.depot = depot
-            self.is_encrypted = is_encrypted
-        else:
+                self._unpack()
+            print(f"Loaded file: {self.csmname}")  # Debug print
+            self.file_index += 1
+        self.file_index -= 1
+        if self.depot is None or self.is_encrypted is None:
             raise Exception("Need to specify depot and encryption if file doesn't already exist")
+
     def __repr__(self):
         return f"Depot {self.depot} (encrypted: {self.is_encrypted}, chunks: {len(self.chunks)}) from CSD file {self.csdname}"
-    def unpack(self, unpacker=None):
+
+    def _unpack(self, unpacker=None):
         if unpacker: assert callable(unpacker)
-        self.chunks = {}
-        with open(self.csmname, "rb") as csmfile: csm=csmfile.read()[0x14:]
+        with open(self.csmname, "rb") as csmfile:
+            csm = csmfile.read()[0x14:]
         for sha, offset, _, length in iter_unpack("<20s Q L L", csm):
-            self.chunks[sha] = (offset, length)
-            if unpacker: unpacker(self, sha, offset, length)
+            self.chunks[sha] = (offset, length, self.file_index)
+            if unpacker:
+                unpacker(self, sha, offset, length)
+
     def write_csm(self):
-        # write CSM header
         with open(self.csmname, "wb") as csmfile:
             csmfile.write(b"SCFS\x14\x00\x00\x00")
             if self.is_encrypted:
@@ -45,18 +60,48 @@ class Chunkstore():
             else:
                 csmfile.write(b"\x02\x00\x00\x00")
             csmfile.write(pack("<L L", self.depot, len(self.chunks)))
-            csmfile.seek(0, 2) # make sure we're at the end of the csm file (in case we're writing to an existing csm)
-            # iterate over chunks
-            for sha, (offset, length) in self.chunks.items():
-                csmfile.write(sha)
-                csmfile.write(pack("<Q L L", offset, 0, length))
+            csmfile.seek(0, 2)
+            for sha, (offset, length, file_index) in self.chunks.items():
+                if file_index == self.file_index:
+                    csmfile.write(sha)
+                    csmfile.write(pack("<Q L L", offset, 0, length))
+
     def get_chunk(self, sha):
-        with open(self.csdname, "rb") as csdfile:
-            csdfile.seek(self.chunks[sha][0])
-            return csdfile.read(self.chunks[sha][1])
+        offset, length, file_index = self.chunks[sha]
+        csdname = f"{self.base_filename}_{file_index}.csd"
+        with open(csdname, "rb") as csdfile:
+            csdfile.seek(offset)
+            return csdfile.read(length)
+
+    def add_chunk(self, sha, data):
+        csdname = f"{self.base_filename}_{self.file_index}.csd"
+        if path.exists(csdname):
+            with open(csdname, "ab") as csdfile:
+                csdfile.seek(0, 2)
+                offset = csdfile.tell()
+                length = len(data)
+                if offset + length > self.max_file_size:
+                    self.write_csm()
+                    self.chunks = {}  # Clear the chunks dictionary
+                    self.file_index += 1
+                    self.csmname = f"{self.base_filename}_{self.file_index}.csm"
+                    self.csdname = f"{self.base_filename}_{self.file_index}.csd"
+                    makedirs(path.dirname(self.csdname), exist_ok=True)
+                    self.add_chunk(sha, data)  # Retry adding the chunk to the new file
+                else:
+                    csdfile.write(data)
+                    self.chunks[sha] = (offset, length, self.file_index)
+        else:
+            makedirs(path.dirname(csdname), exist_ok=True)
+            with open(csdname, "wb") as csdfile:
+                offset = 0
+                length = csdfile.write(data)
+                self.chunks[sha] = (offset, length, self.file_index)
+
+    def get_all_chunks(self):
+        return self.chunks
 
 if __name__ == "__main__":
     if len(argv) > 1:
         chunkstore = Chunkstore(argv[1])
-        chunkstore.unpack()
         print(chunkstore)
