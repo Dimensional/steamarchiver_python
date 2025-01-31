@@ -101,22 +101,24 @@ class Chunkstore:
                     makedirs(path.dirname(self.csdname), exist_ok=True)
                     self.add_chunk(sha, data)  # Retry adding the chunk to the new file
                 else:
-                    csdfile.write(data)
-                    self.chunks[sha] = (offset, length, self.file_index)
-                    # Add chunk to chunks_by_csm
-                    if self.file_index not in self.chunks_by_csm:
-                        self.chunks_by_csm[self.file_index] = []
-                    self.chunks_by_csm[self.file_index].append((sha, offset, length))
+                    if sha not in self.chunks:
+                        csdfile.write(data)
+                        self.chunks[sha] = (offset, length, self.file_index)
+                        # Add chunk to chunks_by_csm
+                        if self.file_index not in self.chunks_by_csm:
+                            self.chunks_by_csm[self.file_index] = []
+                        self.chunks_by_csm[self.file_index].append((sha, offset, length))
         else:
             makedirs(path.dirname(csdname), exist_ok=True)
             with open(csdname, "wb") as csdfile:
                 offset = 0
                 length = csdfile.write(data)
-                self.chunks[sha] = (offset, length, self.file_index)
-                # Add chunk to chunks_by_csm
-                if self.file_index not in self.chunks_by_csm:
-                    self.chunks_by_csm[self.file_index] = []
-                self.chunks_by_csm[self.file_index].append((sha, offset, length))
+                if sha not in self.chunks:
+                    self.chunks[sha] = (offset, length, self.file_index)
+                    # Add chunk to chunks_by_csm
+                    if self.file_index not in self.chunks_by_csm:
+                        self.chunks_by_csm[self.file_index] = []
+                    self.chunks_by_csm[self.file_index].append((sha, offset, length))
 
     def get_all_chunks(self):
         return self.chunks
