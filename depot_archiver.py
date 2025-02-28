@@ -74,7 +74,12 @@ if __name__ == "__main__": # exit before we import our shit if the args are wron
         print("connection limit must be at least 1")
         parser.print_help()
         exit(1)
-        
+    
+    if args.app_depot and args.csv_file:
+        print("Cannot specify both app depot and CSV file")
+        parser.print_help()
+        exit(1)
+
     if args.csv_file:
         args.app_depot = read_csv_file(args.csv_file)
 
