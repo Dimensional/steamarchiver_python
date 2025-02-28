@@ -40,7 +40,12 @@ Usage for the Python scripts:
   logging in if its manifest has previously been downloaded. Most (non-dedicated
   server, non-Valve) free apps are not available to anonymous users; you will
   still need to log into an account to download free games!**
-  ``depot_validator.py`` verifies every chunk in a depot folder to ensure none of
+  - A CSV File can be used as the input data set. The file needs to start with 4 headers in the following order.
+    - ``AppID``
+    - ``DepotID``
+    - ``ManifestID``
+    - ``Branch``
+- ``depot_validator.py`` verifies every chunk in a depot folder to ensure none of
   the files are corrupted or bad.
 - ``get_depot_keys.py`` logs into a Steam account and dumps all the depot keys
   it has access to, which can be used to decrypt downloaded depots. To get the
@@ -113,6 +118,18 @@ Download the Team Fortress 2 Linux client binaries that were released at
 2022-08-11 22:29:49:
 
     python3 depot_archiver.py -a 440 232253 5841585021586447253
+
+Download using a CSV file as the data set for apps, depots, and manifests.
+
+    python3 depot_archiver.py -csv "<path>/<to>/<csv>"
+
+Download and save dumped manifest as readable JSON file for Team Fortress 2 (Recommend use with DryRun "-d").
+
+    python3 depot_archiver --debug-manifest -a 440 232253 5841585021586447253
+
+or
+
+    python3 depot_archiver --debug-manifest -csv "<path>/<to>/<csv>"
 
 Extract those binaries:
 

@@ -9,6 +9,7 @@ from os import makedirs, path, listdir, remove
 from sys import argv
 import logging
 import json
+import csv
 
 _LOG = logging.getLogger("DepotArchiver")
 
@@ -30,6 +31,20 @@ class BranchAction(Action):
             app_depot[-1]['branch'] = values
         setattr(namespace, 'app_depot', app_depot)
 
+def read_csv_file(csv_file):
+    app_depot_list = []
+    with open(csv_file, mode='r') as file:
+        csv_reader = csv.reader(file)
+        next(csv_reader)  # Skip header row
+        for row in csv_reader:
+            app_depot_list.append({
+                'appid': int(row[0]),
+                'depotid': int(row[1]) if row[1] else None,
+                'manifestid': int(row[2]) if row[2] else None,
+                'branch': row[3] if row[3] else None
+            })
+    return app_depot_list
+
 if __name__ == "__main__": # exit before we import our shit if the args are wrong
     parser = ArgumentParser(description='Download Steam content depots for archival. Downloading apps: Specify an app to download all the depots for that app, or an app and depot ID to download the latest version of that depot (or a specific version if the manifest ID is specified.) Downloading workshop items: Use the -w flag to specify the ID of the workshop file to download. Exit code is 0 if all downloads succeeded, or the number of failures if at least one failed.')
     dl_group = parser.add_mutually_exclusive_group()
@@ -37,6 +52,7 @@ if __name__ == "__main__": # exit before we import our shit if the args are wron
     server_group = parser.add_mutually_exclusive_group()
     dl_group.add_argument("-a", type=int, metavar=("appid","depotid"), action=AppDepotAction, nargs='+', help="App, depot, and manifest ID to download. If the manifest ID is omitted, the lastest manifest specified by the public branch will be downloaded.\nIf the depot ID is omitted, all depots specified by the public branch will be downloaded.")
     dl_group.add_argument("-w", type=int, nargs='?', help="Workshop file ID to download.", dest="workshop_id")
+    dl_group.add_argument("-csv", type=str, help="Path to CSV file containing appId, DepotID, ManifestID, and Branch name.", dest="csv_file")
     parser.add_argument("-r", type=str, nargs='?', help="Branch Name.", dest="branch", action=BranchAction)
     parser.add_argument("-n", type=str, nargs='?', help="Branch Password", dest="bpassword")
     parser.add_argument("-b", help="Download into a Steam backup file instead of storing the chunks individually", dest="backup", action="store_true")
@@ -58,8 +74,12 @@ if __name__ == "__main__": # exit before we import our shit if the args are wron
         print("connection limit must be at least 1")
         parser.print_help()
         exit(1)
-    if not args.app_depot and not args.workshop_id:
-        print("must specify at least one appid or workshop file id")
+        
+    if args.csv_file:
+        args.app_depot = read_csv_file(args.csv_file)
+
+    if not args.app_depot and not args.workshop_id and not args.csv_file:
+        print("must specify at least one appid, workshop file id, or CSV file")
         parser.print_help()
         exit(1)
     if args.app_depot and args.workshop_id:
