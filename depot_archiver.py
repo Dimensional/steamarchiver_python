@@ -105,11 +105,9 @@ if __name__ == "__main__": # exit before we import our shit if the args are wron
         parser.print_help()
         exit(1)
     if args.debug:
-        _LOG.setLevel(logging.DEBUG)
-        # logging.basicConfig(level=logging.DEBUG)
+        logging.basicConfig(level=logging.DEBUG)
     elif args.info:
-        _LOG.setLevel(logging.INFO)
-        # logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=logging.INFO)
     # if args.branch and not args.bpassword:
     #     print("You need a password in order to download from a non-Public Branch")
     #     parser.print_help()
@@ -538,7 +536,7 @@ if __name__ == "__main__":
                 exit(1)
             appinfo_path = "./appinfo/%s_%s.vdf" % (appid, highest_changenumber)
         else:
-            _LOG.debug(f"Is the client logged in? {steam_client.logged_on}")
+            _LOG.info(f"Is the client logged in? {steam_client.logged_on}")
             print("Fetching appinfo for", appid)
             tokens = steam_client.get_access_tokens(app_ids=[appid])
             msg = MsgProto(EMsg.ClientPICSProductInfoRequest)
