@@ -9,7 +9,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import logging
 
-def auto_login(client, username="", password="", fallback_anonymous=False, relogin=True):
+def auto_login(client, username="", password="", fallback_anonymous=False, relogin=True, loginId=None):
     assert(type(client) == SteamClient)
     makedirs("./auth", exist_ok=True)
     
@@ -64,7 +64,7 @@ def auto_login(client, username="", password="", fallback_anonymous=False, relog
                 json.dump(credentials, f, indent=4)
                     
         print("Logging in as", webauth.username)
-        client.login(webauth.username, access_token=webauth.refresh_token)
+        client.login(webauth.username, access_token=webauth.refresh_token, login_id=loginId)
         with open("./auth/lastuser.txt", "w") as f: f.write(webauth.username)
         return
     if not username and exists("./auth/lastuser.txt") and relogin:
@@ -73,14 +73,14 @@ def auto_login(client, username="", password="", fallback_anonymous=False, relog
         keypath = join("./auth/", username + ".json")
         with open(keypath, "r") as f: credentials = json.load(f)
         print("Logging in as last user", credentials['username'], "using saved login key")
-        client.login(credentials['username'], access_token=credentials['refresh_token'])
+        client.login(credentials['username'], access_token=credentials['refresh_token'], login_id=loginId),
         return
     if username and exists(join("./auth/", username + ".json")):
         _LOG.info("Attempting to login using saved login key for " + username)
         keypath = join("./auth/", username + ".json")
         with open(keypath, "r") as f: credentials = json.load(f)
         print("Logging in as", credentials['username'], "using saved login key")
-        client.login(credentials['username'], access_token=credentials['refresh_token'])
+        client.login(credentials['username'], access_token=credentials['refresh_token'], login_id=loginId),
         return
     # if no username, fall back to either anonymous or CLI login based on fallback_anonymous
     if fallback_anonymous:
@@ -95,7 +95,7 @@ def auto_login(client, username="", password="", fallback_anonymous=False, relog
 		}
         keypath = join("./auth/", webauth.username + ".json")
         with open(keypath, 'w') as f: json.dump(credentials, f, indent=4)
-        client.login(webauth.username, access_token=webauth.refresh_token)
+        client.login(webauth.username, access_token=webauth.refresh_token, login_id=loginId)
         with open("./auth/lastuser.txt", "w") as f: f.write(webauth.username)
         return
 

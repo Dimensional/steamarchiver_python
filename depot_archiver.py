@@ -66,10 +66,15 @@ if __name__ == "__main__": # exit before we import our shit if the args are wron
     parser.add_argument("-i", help="Log into a Steam account interactively.", dest="interactive", action="store_true")
     parser.add_argument("-u", type=str, help="Username for non-interactive login", dest="username", nargs="?")
     parser.add_argument("-p", type=str, help="Password for non-interactive login", dest="password", nargs="?")
+    parser.add_argument("--login-id", type=int, help="Login ID to use to create unique sessions", dest="login_id", default=None)
     parser.add_argument("--debug-manifest", help="Save manifest data as JSON for debugging", action="store_true")
     log_group.add_argument("--debug", help="Enable debug logging", action="store_true")
     log_group.add_argument("--info", help="Enable info logging", action="store_true")
     args = parser.parse_args()
+    # Initialize app_depot as an empty list
+    if not hasattr(args, 'app_depot'):
+        args.app_depot = []
+    
     if args.connection_limit < 1:
         print("connection limit must be at least 1")
         parser.print_help()
@@ -475,11 +480,11 @@ if __name__ == "__main__":
     steam_client.connect()
     print("Logging in...")
     if args.interactive:
-        auto_login(steam_client, fallback_anonymous=False, relogin=False)
+        auto_login(steam_client, fallback_anonymous=False, relogin=False, loginId=args.login_id)
     elif args.username:
-        auto_login(steam_client, args.username, args.password)
+        auto_login(steam_client, args.username, args.password, loginId=args.login_id)
     else:
-        auto_login(steam_client)
+        auto_login(steam_client, loginId=args.login_id)
     
     if args.use_lancache:
         lancache_ip = detect_lancache()
