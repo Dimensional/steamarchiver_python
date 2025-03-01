@@ -131,6 +131,8 @@ def save_manifest_to_json(manifest, output_dir):
     debug_dir = path.join(output_dir, "debug")
     makedirs(debug_dir, exist_ok=True)
     manifest_path = path.join(debug_dir, f"{manifest.depot_id}_{manifest.gid}.json")
+    if path.exists(manifest_path):
+        return
     
     # Load the depot key
     keyfile = f"./depot/{manifest.depot_id}/{manifest.depot_id}.depotkey"
