@@ -104,6 +104,8 @@ if __name__ == "__main__": # exit before we import our shit if the args are wron
         print("Cannot specify both a server and use LanCache")
         parser.print_help()
         exit(1)
+    if args.login_id == "None":
+        args.login_id = None
     if args.debug:
         logging.basicConfig(level=logging.DEBUG)
     elif args.info:
@@ -301,12 +303,12 @@ def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override
 def try_load_manifest(appid, depotid, manifestid, branch='public', password=None):
     print(f"Getting a manifest for app {appid} depot {depotid} gid {manifestid}")
     dest = "./depot/%s/manifest/%s.manif5" % (depotid, manifestid)
-    makedirs("./depot/%s/manifest" % depotid, exist_ok=True)
     if path.exists(dest):
         with open(dest, "rb") as f:
             print("Loaded cached manifest %s from disk" % manifestid)
             return CDNDepotManifest(c, appid, f.read())
     else:
+        # Try to get the manifest. If it fails, return False
         retry = 0
         while True:
             license_requested = False
@@ -342,8 +344,15 @@ def try_load_manifest(appid, depotid, manifestid, branch='public', password=None
                 else:
                     print(e.message + ": " + str(e.eresult))
                     return False
+        # Unless an exception occurs in the above block, like AccessDenied, the manifest will be downloaded
+        # and saved to disk. The manifest will then be returned as a CDNDepotManifest object.
+        # This also prevents a depot key from being requested if the manifest already exists or
+        # if the exception above occurs, which could result in a 0-length key file.
         print("Downloaded manifest %s" % manifestid)
         print("Saving manifest...") # write manifest to disk. this will be a standard Zip with protobuf data inside
+        get_depotkeys(appid, depotid) # get the depot key
+        if not path.exists('./depot/%s/manifest' % depotid):
+            makedirs('./depot/%s/manifest' % depotid, exist_ok=True) # create the directory if it doesn't exist
         with open(dest, "wb") as f:
             f.write(resp.content)
         return CDNDepotManifest(c, appid, resp.content)
@@ -409,7 +418,7 @@ def get_depotkeys(app, depot):
     #             except ValueError:
     #                 pass
     #     # print("%s keys already saved in depot_keys.txt" % len(keys_saved))
-    if path.exists(keyfile):
+    if path.exists(keyfile) and path.getsize(keyfile) > 0: # Checks if the binary key file exists and is not empty
         key_binary = True
     
     # If neither exist
@@ -576,7 +585,6 @@ if __name__ == "__main__":
 
         if depotid:
             name = appinfo['depots'][str(depotid)]['name'] if 'name' in appinfo['depots'][str(depotid)] else 'unknown'
-            get_depotkeys(appid, depotid)
             if manifestid:
                 print("Archiving", appinfo['common']['name'], "depot", depotid, "manifest", manifestid)
                 exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, branch), c, name, args.dry_run, args.server, args.backup) else 1)
