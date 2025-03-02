@@ -348,14 +348,18 @@ def try_load_manifest(appid, depotid, manifestid, branch='public', password=None
         # and saved to disk. The manifest will then be returned as a CDNDepotManifest object.
         # This also prevents a depot key from being requested if the manifest already exists or
         # if the exception above occurs, which could result in a 0-length key file.
-        print("Downloaded manifest %s" % manifestid)
-        print("Saving manifest...") # write manifest to disk. this will be a standard Zip with protobuf data inside
-        get_depotkeys(appid, depotid) # get the depot key
-        if not path.exists('./depot/%s/manifest' % depotid):
-            makedirs('./depot/%s/manifest' % depotid, exist_ok=True) # create the directory if it doesn't exist
-        with open(dest, "wb") as f:
-            f.write(resp.content)
-        return CDNDepotManifest(c, appid, resp.content)
+        if len(resp.content) != 0:
+            print("Downloaded manifest %s" % manifestid)
+            print("Saving manifest...") # write manifest to disk. this will be a standard Zip with protobuf data inside
+            get_depotkeys(appid, depotid) # get the depot key
+            if not path.exists('./depot/%s/manifest' % depotid):
+                makedirs('./depot/%s/manifest' % depotid, exist_ok=True) # create the directory if it doesn't exist
+            with open(dest, "wb") as f:
+                f.write(resp.content)
+            return CDNDepotManifest(c, appid, resp.content)
+        else:
+            print("Manifest %s is empty" % manifestid)
+            return False
 
 def get_gid(manifest):
     if type(manifest) == str:
