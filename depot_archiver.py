@@ -481,8 +481,10 @@ if __name__ == "__main__":
     print("Logging in...")
     if args.interactive:
         auto_login(steam_client, fallback_anonymous=False, relogin=False, loginId=args.login_id)
-    elif args.username:
+    elif args.username and args.password:
         auto_login(steam_client, args.username, args.password, loginId=args.login_id)
+    elif args.username:
+        auto_login(steam_client, args.username, loginId=args)
     else:
         auto_login(steam_client, loginId=args.login_id)
     

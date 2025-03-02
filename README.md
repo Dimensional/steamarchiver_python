@@ -24,6 +24,12 @@ For the Python scripts, install the requirements:
 
 ``pip3 install -r requirements.txt``
 
+**Note:** If you have previously run this command, you will need to manually 
+ uninstall the steam python libraries before rerunning. This ensures you get
+ a tested Git Commit of the Steam Python Library.
+
+``pip3 uninstall steam``
+
 Many scripts require authentication, which can be passed on the command line
 using the ``-u [username]`` flag. ``-p [password]`` will allow you to pass the
 password on the command line as well; if you do not do this, you will be
@@ -40,11 +46,20 @@ Usage for the Python scripts:
   logging in if its manifest has previously been downloaded. Most (non-dedicated
   server, non-Valve) free apps are not available to anonymous users; you will
   still need to log into an account to download free games!**
-  - A CSV File can be used as the input data set. The file needs to start with 4 headers in the following order.
+  - A CSV File can be used as the input data set. The file needs to start with 4 
+    headers in the following order. It is ***highly recommended*** to make the CSV using
+    a text editor, such as Notepad. Excel has issues with the Manifest IDs due to
+    them being long numbers. Excel's default action is to convert it and cut out
+    some of the digits, breaking the list.
     - ``AppID``
     - ``DepotID``
     - ``ManifestID``
     - ``Branch``
+  - **If you are running the Steam Client** on the same PC when attempting to download
+    your files, it is prefered to include the ``--login-id`` argument, otherwise
+    Steam will disconnect from your client. By Default, Login ID is generated based
+    on your PC's private IP Address, so having 2 connections to steam from the same
+    PC will conflict. Using this Argument with a random set of numbers will fix this
 - ``depot_validator.py`` verifies every chunk in a depot folder to ensure none of
   the files are corrupted or bad.
 - ``get_depot_keys.py`` logs into a Steam account and dumps all the depot keys

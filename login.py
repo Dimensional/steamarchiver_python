@@ -81,6 +81,7 @@ def auto_login(client, username="", password="", fallback_anonymous=False, relog
         with open(keypath, "r") as f: credentials = json.load(f)
         print("Logging in as", credentials['username'], "using saved login key")
         client.login(credentials['username'], access_token=credentials['refresh_token'], login_id=loginId),
+        with open("./auth/lastuser.txt", "w") as f: f.write(credentials['username'])
         return
     # if no username, fall back to either anonymous or CLI login based on fallback_anonymous
     if fallback_anonymous:
