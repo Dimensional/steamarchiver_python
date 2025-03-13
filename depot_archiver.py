@@ -587,22 +587,30 @@ if __name__ == "__main__":
                     "info, run get_appinfo.py on this app using an account "
                     "authorized to access it.")
 
+        if path.exists(path.join('./branches', f"{appid}_{branch}.key")):
+            with open(path.join('./branches', f"{appid}_{branch}.key"), "rb") as f:
+                branch_key = f.read()
         if depotid:
             name = appinfo['depots'][str(depotid)]['name'] if 'name' in appinfo['depots'][str(depotid)] else 'unknown'
             if manifestid:
                 print("Archiving", appinfo['common']['name'], "depot", depotid, "manifest", manifestid)
                 exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, branch), c, name, args.dry_run, args.server, args.backup) else 1)
-            elif branch and args.bpassword:
+            elif branch and (args.bpassword or branch_key):
                 try:
-                    branch_key = beta_check_password(appid, args.bpassword, c)
+                    if not branch_key:
+                        branch_key = beta_check_password(appid, args.bpassword, c)
                     if args.encryptedbranch != '':
                         encrypted_manifest = args.encryptedbranch
                     else:
-                        encrypted_manifest = get_gid(appinfo['depots'][str(depotid)]['encryptedmanifests'][args.branch])
-                    manifestid = int.from_bytes(symmetric_decrypt_ecb(unhexlify(encrypted_manifest),branch_key[(appid, args.branch)]),byteorder='little')
+                        encrypted_manifest = get_gid(appinfo['depots'][str(depotid)]['encryptedmanifests'][branch])
+                    manifestid = int.from_bytes(symmetric_decrypt_ecb(unhexlify(encrypted_manifest),branch_key[(appid, branch)]),byteorder='little')
                     print("Archiving", appinfo['common']['name'], "depot", depotid, "branch", args.branch, "manifest", manifestid, "using key", branch_key)
-                    exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, args.branch, args.bpassword), c, name, args.dry_run, args.server, args.backup) else 1)
-                    # exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, args.branch, branch_key), c, name, args.dry_run, args.server, args.backup) else 1)
+                    branch_key_path = "./branches"
+                    makedirs(path.dirname(branch_key_path), exist_ok=True)
+                    with open(path.join(branch_key_path, f"{appid}_{branch}.key"), "wb") as f:
+                        f.write(branch_key[(appid, branch)])
+                    # exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, args.branch, args.bpassword), c, name, args.dry_run, args.server, args.backup) else 1)
+                    exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, args.branch, branch_key[(appid, branch)]), c, name, args.dry_run, args.server, args.backup) else 1)
                 except SteamError as e:
                     print(f"Error:", e)
                     exit(1)

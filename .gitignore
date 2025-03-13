@@ -9,6 +9,7 @@ extract/
 clientmanifests/
 clientpackages/
 keys/
+branches/
 *.swp
 depot_keys.txt
 last_change.txt

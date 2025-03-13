@@ -71,6 +71,17 @@ def migrate():
                         keyfile.write(key)
                         num_keys += 1
     
+    keys_dir = "./keys/"
+    if exists(keys_dir):
+        for key_file in glob(join(keys_dir, "*.depotkey")):
+            depot_id = basename(key_file).replace(".depotkey", "")
+            target_depot = join(target_dir, depot_id)
+            makedirs(target_depot, exist_ok=True)
+            target = join(target_depot, depot_id + ".depotkey")
+            if not exists(target):
+                rename(key_file, target)
+                num_keys += 1
+    
     print(f"Migrated {num_manifests} manifests (Skipping {skipped_manifests}), {num_chunks} chunks (Skipping {skipped_chunks}), {num_keys} keys")
     
 if __name__ == "__main__":
