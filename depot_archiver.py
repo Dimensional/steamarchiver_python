@@ -156,8 +156,8 @@ def save_manifest_to_json(manifest, output_dir):
     for file in manifest.payload.mappings:
         decrypted_filename = symmetric_decrypt(b64decode(file.filename), decryption_key).decode('utf-8').rstrip('\x00')
         file_dict = {
-            "Encrypted Name": file.filename,
-            "Decrypted Name": decrypted_filename,
+            "encryptedName": file.filename,
+            "decryptedName": decrypted_filename,
             "size": file.size,
             "flags": file.flags,
             "sha_filename": hexlify(file.sha_filename).decode(),
@@ -306,7 +306,13 @@ def try_load_manifest(appid, depotid, manifestid, branch='public', password=None
     if path.exists(dest):
         with open(dest, "rb") as f:
             print("Loaded cached manifest %s from disk" % manifestid)
-            return CDNDepotManifest(c, appid, f.read())
+            try:
+                return CDNDepotManifest(c, appid, f.read())
+            except Exception as e:
+                if "Expecting protobuf payload" in str(e):
+                    print(f"Error: {e}. Deleting the manifest file {dest}")
+                    remove(dest)
+                raise e
     else:
         # Try to get the manifest. If it fails, return False
         retry = 0
@@ -356,7 +362,13 @@ def try_load_manifest(appid, depotid, manifestid, branch='public', password=None
                 makedirs('./depot/%s/manifest' % depotid, exist_ok=True) # create the directory if it doesn't exist
             with open(dest, "wb") as f:
                 f.write(resp.content)
-            return CDNDepotManifest(c, appid, resp.content)
+            try:
+                return CDNDepotManifest(c, appid, resp.content)
+            except Exception as e:
+                if "Expecting protobuf payload" in str(e):
+                    print(f"Error: {e}. Deleting the manifest file {dest}")
+                    remove(dest)
+                raise e
         else:
             print("Manifest %s is empty" % manifestid)
             return False
