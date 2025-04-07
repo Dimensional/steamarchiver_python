@@ -78,18 +78,23 @@ class Chunkstore():
 
     def _load_existing_files(self):
         """Loads existing CSD/CSM pairs for the depot and rebuilds the SQLite database."""
-        for filename in sorted(f for f in os.listdir(self.folder) if f.startswith(f"{self.depot}_") and f.endswith(".csm")):  # Renamed `file` to `filename`
+        for filename in sorted(f for f in os.listdir(self.folder) if f.startswith(f"{self.depot}_") and f.endswith(".csm")):
             base_name = filename.replace(".csm", "")
             csd_path = path.join(self.folder, base_name + ".csd")
             csm_path = path.join(self.folder, base_name + ".csm")
             if path.exists(csd_path):
+                # Append the CSD and CSM file paths as a tuple to self.files
                 self.files.append((csd_path, csm_path))
 
-                # Parse the CSM file and rebuild the SQLite database
-                self._parse_csm_metadata(csm_path, len(self.files))
-
         if self.files:
+            # Check encryption consistency before parsing metadata
             self._check_encryption_consistency()
+
+            # Parse metadata for each CSM file
+            for index, (_, csm_path) in enumerate(self.files, start=1):
+                self._parse_csm_metadata(csm_path, index)
+
+            # Update the current file index and size
             self.current_file_index = len(self.files)
             self.current_csd, self.current_csm = self.files[-1]
             self.current_file_size = path.getsize(self.current_csd)
