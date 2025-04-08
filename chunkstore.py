@@ -263,11 +263,64 @@ class Chunkstore():
 
             print(f"Unpacked file: {output_path}")
 
+    def pack(self, input_files):
+        """Packages the specified list of files into the chunkstore.
+
+        Args:
+            input_files (list): List of file paths to be added. File names must be SHA1s.
+
+        Raises:
+            Exception: If any file in the list does not exist or has an invalid name.
+        """
+        for file_path in input_files:
+            if not path.isfile(file_path):
+                raise Exception(f"File {file_path} does not exist or is not a valid file")
+
+            sha = path.basename(file_path)  # Use the file name as the SHA
+            if len(sha) != 40 or not all(c in "0123456789abcdef" for c in sha.lower()):
+                raise Exception(f"Invalid SHA1 file name: {file_path}")
+
+            with open(file_path, "rb") as file:
+                content = file.read()
+                self.write_chunk(unhexlify(sha), content)
+                print(f"Packed file: {file_path}")
+
     def close(self):
-        # Close the SQLite connection
-        self.conn.close()
+        """Closes the SQLite connection."""
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+        print("SQLite connection closed.")
+
+    def debug_export_csv(self, output_csv_path):
+        """Exports the SQLite database records to a CSV file for debugging purposes.
+
+        Args:
+            output_csv_path (str): Path to the output CSV file.
+
+        Raises:
+            Exception: If there is an error writing to the CSV file.
+        """
+        try:
+            with open(output_csv_path, "w", newline="") as csvfile:
+                csvfile.write("sha,chunkstore_index,offset,length\n")  # Write header
+                cursor = self.conn.execute("SELECT sha, chunkstore_index, offset, length FROM chunks")
+                for row in cursor.fetchall():
+                    csvfile.write(f"{row[0]},{row[1]},{row[2]},{row[3]}\n")
+            print(f"Debug export completed: {output_csv_path}")
+        except Exception as e:
+            raise Exception(f"Failed to export debug CSV: {e}")
 
 if __name__ == "__main__":
     if len(argv) > 1:
-        chunkstore = Chunkstore(argv[1])
-        print(chunkstore)
+        chunkstore = None
+        try:
+            chunkstore = Chunkstore(argv[1])  # Initialize the Chunkstore
+            print(chunkstore)  # Perform operations (e.g., print its representation)
+        except KeyboardInterrupt:
+            print("Processing interrupted by user.")
+        except Exception as e:
+            print(f"An error occurred: {e}")
+        finally:
+            if chunkstore:
+                chunkstore.close()  # Ensure the SQLite connection is closed
