@@ -301,11 +301,18 @@ class Chunkstore():
                 print(f"Packed file: {file_path}")
 
     def close(self):
-        """Closes the SQLite connection."""
+        """Closes the SQLite connection and any thread-local connections."""
+        # Close the main connection
         if self.conn:
             self.conn.close()
             self.conn = None
-        print("SQLite connection closed.")
+            print("Main SQLite connection closed.")
+
+        # Close thread-local connections
+        if hasattr(self._thread_local, "conn"):
+            self._thread_local.conn.close()
+            self._thread_local.conn = None
+            print("Thread-local SQLite connection closed.")
 
     def debug_export_csv(self, output_csv_path):
         """Exports the SQLite database records to a CSV file for debugging purposes.
