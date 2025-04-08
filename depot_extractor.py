@@ -235,12 +235,13 @@ if __name__ == "__main__":
         metadata = read_metadata(metadata_path)
 
         try:
-            # First, create all directories
-            for file in manifest.iter_files():
-                if file.flags == 64:
-                    dir_path = join(output_dir, file.filename)
-                    if not exists(dir_path):
-                        makedirs(dir_path, exist_ok=True)
+            if not args.dry_run:
+                # First, create all directories
+                for file in manifest.iter_files():
+                    if file.flags == 64:
+                        dir_path = join(output_dir, file.filename)
+                        if not exists(dir_path):
+                            makedirs(dir_path, exist_ok=True)
 
             # Then, process all files
             for file in manifest.iter_files():

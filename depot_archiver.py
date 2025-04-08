@@ -192,16 +192,16 @@ def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override
         return True
     dest = "./depot/" + str(manifest.depot_id) + "/chunk/"
     makedirs(dest, exist_ok=True)
+    chunkstore = None
     if backup:
-        chunkstore = Chunkstore(str(manifest.depot_id) + "_depotcache_1.csm", depot=manifest.depot_id, is_encrypted=True)
-        if path.exists(chunkstore.csdname): chunkstore.unpack()
-        csdfile = open(chunkstore.csdname, "ab")
-    else:
-        chunkstore, csdfile = None, None
+        chunkstore_folder = path.join("./depot", str(manifest.depot_id), "chunkstore")
+        makedirs(chunkstore_folder, exist_ok=True)  # Ensure the chunkstore folder exists
+        chunkstore = Chunkstore(chunkstore_folder, depot=manifest.depot_id, is_encrypted=True)
     known_chunks = []
     for file in manifest.payload.mappings:
         for chunk in file.chunks:
             known_chunks.append(chunk.sha)
+    known_chunks.sort()  # Sort chunks alphanumerically
     print("Beginning to download", len(known_chunks), "encrypted", "chunk" if len(known_chunks) == 1 else "chunks")
     class download_state():
         def __init__(self):
@@ -209,35 +209,31 @@ def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override
             self.chunks_skipped = 0
             self.bytes = 0
     download_state = download_state()
-    async def dl_worker(chunks, download_state, servers, chunkstore=None, csdfile=None):
+    async def dl_worker(chunks, download_state, servers, chunkstore=None):
         server = servers[0]
         async with ClientSession() as session:
-            for index, chunk in enumerate(chunks):
-                # chunkstr = hexlify(chunk).decode()
-                # dest = dest + chunkstr[:3] + "/" + chunkstr[3:6] + "/"
-                if path.exists(dest + hexlify(chunk).decode()) or (chunkstore and (chunk in chunkstore.chunks.keys())):
-                    download_state.chunks_skipped += 1
-                    del chunks[index]
             for chunk in chunks:
                 chunk_str = hexlify(chunk).decode()
-                # dest = dest + chunk_str[:3] + "/" + chunk_str[3:6] + "/"
-                if path.exists(dest + chunk_str) or (chunkstore and (chunk in chunkstore.chunks.keys())):
+                # Skip the chunk if it already exists in the destination or chunkstore
+                if path.exists(dest + chunk_str) or (chunkstore and chunkstore.file_exists(chunk)):
                     download_state.chunks_skipped += 1
                     continue
+
                 while True:
                     try:
                         if server_override:
                             request_url = "%s/depot/%s/chunk/%s" % (server_override, manifest.depot_id, chunk_str)
-                            host = server.host
+                            headers = {"Host": server.host}  # Set the Host header to the original CDN server
                         else:
                             request_url = "%s://%s:%s/depot/%s/chunk/%s" % ("https" if server.https else "http",
                                 server.host,
                                 server.port,
                                 manifest.depot_id,
                                 chunk_str)
-                            host = ("https" if server.https else "http") + "://" + server.host
+                            headers = {}  # No custom Host header needed
+
                         _LOG.info(f"Downloading from {request_url}")
-                        async with session.get(request_url) as response:
+                        async with session.get(request_url, headers=headers) as response:
                             if response.ok:
                                 download_state.bytes += response.content_length
                                 content = await response.content.read()
@@ -248,21 +244,19 @@ def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override
                                 server = servers[0]
                                 continue
                             elif 400 <= response.status < 500:
-                                print(f"\033[31merror: received status code {response.status} (on chunk {chunk_str}, server {host})\033[0m")
+                                print(f"\033[31merror: received status code {response.status} (on chunk {chunk_str}, server {server.host})\033[0m")
                                 return False
                     except Exception as e:
                         print("rotating to next server:", e)
                     servers.rotate(-1)
                     server = servers[0]
                     await sleep(0.5)
-                if not csdfile: f = open(dest + chunk_str, "wb")
-                else: f = csdfile
-                f.seek(0, 2)
-                offset = f.tell()
-                length = f.write(content)
-                if chunkstore:
-                    chunkstore.chunks[chunk] = (offset, length)
-                if not csdfile: f.close()
+
+                if not chunkstore:
+                    with open(dest + chunk_str, "wb") as f:
+                        f.write(content)
+                else:
+                    chunkstore.write_chunk(chunk, content)
                 download_state.chunks_dled += 1
     async def summary_printer(download_state):
         averages = []
@@ -289,13 +283,20 @@ def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override
         workers = [summary_printer(download_state)]
         chunk_size = int(ceil(len(known_chunks)/args.connection_limit))
         for i in range(args.connection_limit):
-            workers.append(dl_worker(known_chunks[i * chunk_size:i * chunk_size + chunk_size], download_state, c.servers.copy(), chunkstore, csdfile))
+            workers.append(dl_worker(known_chunks[i * chunk_size:i * chunk_size + chunk_size], download_state, c.servers.copy(), chunkstore))
         await gather(*workers)
 
-    run(run_workers(download_state))
-    if chunkstore:
-        chunkstore.write_csm()
-        csdfile.close()
+    try:
+        run(run_workers(download_state))
+    except KeyboardInterrupt:
+        print("\n\033[31mDownload interrupted by user.\033[0m")
+    except Exception as e:
+        print(f"\n\033[31mAn error occurred: {e}\033[0m")
+    finally:
+        if backup:
+            print("Writing CSM and closing chunkstore...")
+            chunkstore.write_csm()
+            chunkstore.close()
     print("\nFinished downloading", manifest.depot_id, "(%s)" % (name), "gid", manifest.gid, "from", datetime.fromtimestamp(manifest.creation_time))
     print("Downloaded %s %s and skipped %s" % (download_state.chunks_dled, "chunk" if download_state.chunks_dled == 1 else "chunks", download_state.chunks_skipped))
     return True

@@ -2,7 +2,7 @@
 from argparse import ArgumentParser
 from binascii import hexlify, unhexlify
 ## Multi-threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, thread
 from queue import Queue # Thread-Safe variable writing.
 ##
 from datetime import datetime
@@ -11,7 +11,7 @@ from glob import glob
 from hashlib import sha1
 from io import BytesIO
 from os import scandir, makedirs, remove
-from os.path import dirname, exists, join
+from os.path import dirname, exists, join, splitext
 from pathlib import Path
 from struct import unpack
 from sys import argv
@@ -30,10 +30,10 @@ if __name__ == "__main__": # exit before we import our shit if the args are wron
     # parser.add_argument('-m', dest="manifests", help="Path to the manifest file to validate the files", nargs='?')
     parser.add_argument('-t', type=int, default=1, dest="threads", help="specifies the number of threads to use for processing the files")
     args = parser.parse_args()
-    if args.backup and args.manifests:
-        print("At this time, backup and manifest filtering can not be used together.")
-        parser.print_help()
-        exit(1)
+    # if args.backup and args.manifests:
+    #     print("At this time, backup and manifest filtering can not be used together.")
+    #     parser.print_help()
+    #     exit(1)
         
     file_list = []
     if args.file_list:
@@ -52,56 +52,34 @@ from steam.core.manifest import DepotManifest
 from steam.core.crypto import symmetric_decrypt
 from chunkstore import Chunkstore
 
-def process_file(file, value, badfiles):
-    if args.files and file not in args.files:
+def process_file(chunk_path, chunk, badfiles):
+    
+    if args.files and chunk not in args.files:
         return None, True  # Skip files not in the list
     
     try:
-        if args.backup:
-            chunkhex = hexlify(file).decode()
-            chunk_data = None
-            is_encrypted = False
-            try:
-                chunkstore = chunkstores[chunks_by_store[file]]
-                chunk_data = chunkstore.get_chunk(file)
-                is_encrypted = chunkstore.is_encrypted
-            except Exception as e:
-                print(f"\033[31mError retrieving chunk\033[0m {chunkhex}: {e}")
-                ##breakpoint()
-                badfiles.put(chunkhex)
-                return chunkhex, False
-            if is_encrypted:
+        chunkhex = hexlify(unhexlify(chunk.replace("_decrypted", ""))).decode()
+        if exists(chunk_path + chunkhex):
+            with open(chunk_path + chunkhex, "rb") as chunkfile:
                 if args.depotkey:
-                    decrypted = symmetric_decrypt(chunk_data, args.depotkey)
+                    try:
+                        decrypted = symmetric_decrypt(chunkfile.read(), args.depotkey)
+                    except ValueError as e:
+                        print(f"{e}")
+                        print(f"\033[31mError, unable to decrypt file:\033[0m {chunkhex}")
+                        badfiles.put(chunkhex)
+                        return chunkhex, False
                 else:
                     print("\033[31mERROR: chunk %s is encrypted, but no depot key was specified\033[0m" % chunkhex)
                     badfiles.put(chunkhex)
                     return chunkhex, False
-            else:
-                decrypted = chunk_data
+        elif exists(chunk_path + chunkhex + "_decrypted"):
+            with open(chunk_path + chunkhex + "_decrypted", "rb") as chunkfile:
+                decrypted = chunkfile.read()
         else:
-            chunkhex = hexlify(unhexlify(file.replace("_decrypted", ""))).decode()
-            if exists(chunk_path + chunkhex):
-                with open(chunk_path + chunkhex, "rb") as chunkfile:
-                    if args.depotkey:
-                        try:
-                            decrypted = symmetric_decrypt(chunkfile.read(), args.depotkey)
-                        except ValueError as e:
-                            print(f"{e}")
-                            print(f"\033[31mError, unable to decrypt file:\033[0m {chunkhex}")
-                            badfiles.put(chunkhex)
-                            return chunkhex, False
-                    else:
-                        print("\033[31mERROR: chunk %s is encrypted, but no depot key was specified\033[0m" % chunkhex)
-                        badfiles.put(chunkhex)
-                        return chunkhex, False
-            elif exists(chunk_path + chunkhex + "_decrypted"):
-                with open(chunk_path + chunkhex + "_decrypted", "rb") as chunkfile:
-                    decrypted = chunkfile.read()
-            else:
-                print("missing chunk " + chunkhex)
-                badfiles.put(chunkhex)
-                return chunkhex, False
+            print("missing chunk " + chunkhex)
+            badfiles.put(chunkhex)
+            return chunkhex, False
         
         decompressed = None
         if decrypted[:2] == b'VZ': # LZMA
@@ -138,13 +116,14 @@ def process_file(file, value, badfiles):
             badfiles.put(chunkhex)
             return chunkhex, False
     except IsADirectoryError:
-        return file, False
+        return chunkhex, False
 
 if __name__ == "__main__":
     if migration_needed(): migrate()
-    path = "./depot/%s/" % args.depotid
-    chunk_path = join(path, "chunk")
-    keyfile = "./%s/%s.depotkey" % path, args.depotid
+    path = "./depot/%s" % args.depotid
+    chunk_path = join(path, "chunk/")
+    keyfile = "./depot/%s/%s.depotkey" % (args.depotid, args.depotid)
+    # quit()
     if args.depotkey:
         args.depotkey = bytes.fromhex(args.depotkey)
     elif exists(keyfile):
@@ -167,17 +146,17 @@ if __name__ == "__main__":
         print("\033[31mERROR: files are encrypted, but no depot key was specified and no depot_keys.txt or depotkey file exists\033[0m")
         exit(1)
 
-    chunks = {}
+    # chunks = {}
     if args.backup:
-        chunkstores = {}
-        chunks_by_store = {}
-        for csm in glob(args.backup.replace("_1.csm","").replace("_1.csd","") + "_*.csm"):
-            chunkstore = Chunkstore(csm)
-            chunkstore.unpack()
-            for chunk, _ in chunkstore.chunks.items():
-                chunks[chunk] = _
-                chunks_by_store[chunk] = csm
-            chunkstores[csm] = chunkstore
+        try:
+            chunkstore = Chunkstore(args.backup, args.depotid)
+            chunklist = chunkstore.validate_chunks(depot_key=args.depotkey, threads=args.threads)
+            print("Bad Files:")
+            # for sha, valid in chunklist.items():
+            #     if not valid:
+            #         print(sha)
+        finally:
+            chunkstore.close()
     # elif args.manifests:
     #     manifestChunks = set()
     #     manifestFiles = []
@@ -197,11 +176,27 @@ if __name__ == "__main__":
     #                     manifestChunks.add(chunk.sha)
     #     for name in manifestChunks:
     #         chunks[name] = 0
-    else:
+    else:       
         chunkFiles = [data.name for data in scandir(chunk_path) if data.is_file()
-        and not data.name.endswith(".zip")]
-        for name in chunkFiles: chunks[name] = 0
-
+        and splitext(data.name)[1] == ""]
+        
+        badfiles = Queue()
+        
+        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+            future_to_file = {
+                executor.submit(process_file, chunk_path, chunk, badfiles): chunk
+                for chunk in chunkFiles}
+        
+            for future in as_completed(future_to_file):
+                future.result()
+        
+        if not badfiles.empty():
+            print("Bad File:")
+        while not badfiles.empty():
+            bad = badfiles.get()
+            print(bad)
+    
+    # print(f"Found chunk files: {chunk_path}/{chunkFiles}")
     def is_hex(s):
         try:
             unhexlify(s)
@@ -209,15 +204,3 @@ if __name__ == "__main__":
         except:
             return False
 
-    badfiles = Queue()
-    
-    with ThreadPoolExecutor(max_workers=args.threads) as executor:
-        future_to_file = {executor.submit(process_file, file, value, badfiles): file for file, value in chunks.items()}
-        for future in as_completed(future_to_file):
-            future.result()
- 
-    if not badfiles.empty():
-        print("Bad File:")
-    while not badfiles.empty():
-        bad = badfiles.get()
-        print(bad)

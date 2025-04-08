@@ -5,6 +5,12 @@ from struct import pack, unpack
 from sys import argv
 import os
 import sqlite3
+from steam.core.crypto import symmetric_decrypt
+from io import BytesIO
+from zipfile import BadZipFile, ZipFile
+import lzma
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class Chunkstore():
     def __init__(self, folder, depot=None, is_encrypted=None, max_file_size=2**30): # Limits to 1GB per file
@@ -28,16 +34,17 @@ class Chunkstore():
         self.current_csd = None
         self.current_file_index = 0
         self.current_file_size = 0
+        self._thread_local = threading.local()  # Thread-local storage for SQLite connections
 
         if not path.exists(self.folder):
             raise Exception(f"Folder {self.folder} does not exist")
 
         # Initialize in-memory SQLite database before loading existing files
         self.conn = sqlite3.connect(":memory:")
-        self._init_database()
+        self._init_database(self.conn)
 
         # Load existing files after the database is initialized
-        self._load_existing_files()
+        self._load_existing_files_to_connection(self.conn)
 
     def __repr__(self):
         """Returns a string representation of the Chunkstore instance."""
@@ -48,9 +55,17 @@ class Chunkstore():
                 f"max_file_size={self.max_file_size}, chunkstore_files={len(self.files)}, "
                 f"total_chunks={total_chunks})")
 
-    def _init_database(self):
-        """Initializes the SQLite database and creates the necessary table and index."""
-        self.conn.execute("""
+    def _get_thread_local_connection(self):
+        """Gets or creates a thread-local SQLite connection."""
+        if not hasattr(self._thread_local, "conn"):
+            self._thread_local.conn = sqlite3.connect(":memory:")
+            self._init_database(self._thread_local.conn)
+            self._load_existing_files_to_connection(self._thread_local.conn)
+        return self._thread_local.conn
+
+    def _init_database(self, conn):
+        """Initializes the SQLite database for a given connection."""
+        conn.execute("""
             CREATE TABLE chunks (
                 sha TEXT PRIMARY KEY,
                 chunkstore_index INTEGER,
@@ -58,7 +73,7 @@ class Chunkstore():
                 length INTEGER
             )
         """)
-        self.conn.execute("CREATE INDEX idx_sha ON chunks (sha)")
+        conn.execute("CREATE INDEX idx_sha ON chunks (sha)")
 
     def _check_encryption_consistency(self):
         """Checks if all existing CSM files have consistent headers and encryption flags."""
@@ -76,7 +91,7 @@ class Chunkstore():
                     raise Exception(f"Encryption mismatch in file {csm_path}. "
                                     f"Expected {'encrypted' if self.is_encrypted else 'decrypted'}.")
 
-    def _load_existing_files(self):
+    def _load_existing_files_to_connection(self, conn):
         """Loads existing CSD/CSM pairs for the depot and rebuilds the SQLite database."""
         for filename in sorted(
             (f for f in os.listdir(self.folder) if f.startswith(f"{self.depot}_") and f.endswith(".csm")),
@@ -95,15 +110,15 @@ class Chunkstore():
 
             # Parse metadata for each CSM file
             for index, (_, csm_path) in enumerate(self.files, start=1):
-                self._parse_csm_metadata(csm_path, index)
+                self._parse_csm_metadata_to_connection(csm_path, index, conn)
 
             # Update the current file index and size
             self.current_file_index = len(self.files)
             self.current_csd, self.current_csm = self.files[-1]
             self.current_file_size = path.getsize(self.current_csd)
 
-    def _parse_csm_metadata(self, csm_path, chunkstore_index):
-        """Parses metadata from a CSM file and populates the SQLite database."""
+    def _parse_csm_metadata_to_connection(self, csm_path, chunkstore_index, conn):
+        """Parses metadata from a CSM file and populates the SQLite database for a given connection."""
         with open(csm_path, "rb") as csmfile:
             # Skip the header (12 bytes)
             csmfile.seek(12)
@@ -116,11 +131,11 @@ class Chunkstore():
                 sha = hexlify(csmfile.read(20)).decode()
                 offset, _, length = unpack("<Q L L", csmfile.read(16)) 
                 # Insert the metadata into the SQLite database
-                self.conn.execute("""
+                conn.execute("""
                     INSERT OR REPLACE INTO chunks (sha, chunkstore_index, offset, length)
                     VALUES (?, ?, ?, ?)
                 """, (sha, chunkstore_index, offset, length))
-            self.conn.commit()
+            conn.commit()
 
     def _write_csm_header(self, csmfile):
         """Writes the common header for a CSM file."""
@@ -310,6 +325,105 @@ class Chunkstore():
             print(f"Debug export completed: {output_csv_path}")
         except Exception as e:
             raise Exception(f"Failed to export debug CSV: {e}")
+
+    def validate_chunks(self, chunk_list=None, depot_key=None, threads=None):
+        """Validates the integrity of chunks in the chunkstore.
+
+        Args:
+            chunk_list (list, optional): List of SHA1 hashes (in hexadecimal) of chunks to validate.
+                                         If None, validates all chunks in the chunkstore.
+            depot_key (bytes, optional): Key used to decrypt encrypted chunks.
+            threads (int, optional): Maximum number of threads to use for parallel processing.
+
+        Returns:
+            dict: A dictionary with chunk SHA1s as keys and validation results (True/False) as values.
+        """
+        validation_results = {}
+
+        # Determine the number of threads to use
+        if threads is None:
+            threads = max(1, os.cpu_count() - 1)  # Use all but one CPU core
+        else:
+            threads = max(1, min(threads, os.cpu_count()))  # Clamp threads between 1 and CPU count
+
+        # If no specific chunks are provided, validate all chunks in the chunkstore
+        if chunk_list is None:
+            conn = self._get_thread_local_connection()
+            cursor = conn.execute("SELECT sha FROM chunks")
+            chunk_list = [row[0] for row in cursor.fetchall()]
+
+        # Use ThreadPoolExecutor to validate chunks in parallel
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            future_to_sha = {executor.submit(self._validate_single_chunk, sha_hex, depot_key): sha_hex for sha_hex in chunk_list}
+            for future in as_completed(future_to_sha):
+                sha_hex, result = future.result()
+                validation_results[sha_hex] = result
+
+        return validation_results
+
+    def _validate_single_chunk(self, sha_hex, depot_key):
+        """Validates a single chunk.
+
+        Args:
+            sha_hex (str): The SHA1 hash of the chunk in hexadecimal format.
+            depot_key (bytes, optional): Key used to decrypt encrypted chunks.
+
+        Returns:
+            tuple: A tuple containing the SHA1 hash and the validation result (True/False).
+        """
+        try:
+            # Retrieve the chunk content using a thread-local connection
+            conn = self._get_thread_local_connection()
+            cursor = conn.execute("SELECT chunkstore_index, offset, length FROM chunks WHERE sha = ?", (sha_hex,))
+            result = cursor.fetchone()
+            if not result:
+                return sha_hex, False
+            chunkstore_index, offset, length = result
+            csd_path, _ = self.files[chunkstore_index - 1]
+            with open(csd_path, "rb") as csdfile:
+                csdfile.seek(offset)
+                content = csdfile.read(length)
+
+            # Decrypt the content if the chunkstore is encrypted
+            if self.is_encrypted and depot_key:
+                content = symmetric_decrypt(content, depot_key)
+
+            # Decompress the content based on its type
+            if content[:2] == b'VZ':  # LZMA
+                print("Testing (LZMA) from chunk", sha_hex)
+                try:
+                    decompressed_size = unpack('<i', content[-6:-2])[0]
+                    decompressed = lzma.LZMADecompressor(
+                        lzma.FORMAT_RAW,
+                        filters=[lzma._decode_filter_properties(lzma.FILTER_LZMA1, content[7:12])]
+                    ).decompress(content[12:-10])[:decompressed_size]
+                except lzma.LZMAError as e:
+                    print(f"\033[31mERROR: LZMA decompression failed\033[0m {e}")
+                    return sha_hex, False
+            elif content[:2] == b'PK':  # Zip
+                print("Testing (Zip) from chunk", sha_hex)
+                try:
+                    with ZipFile(BytesIO(content)) as zipfile:
+                        decompressed = zipfile.read(zipfile.filelist[0])
+                except BadZipFile as e:
+                    print(f"\033[31mERROR: Zip decompression failed\033[0m {e}")
+                    return sha_hex, False
+                except Exception as e:
+                    print(f"\033[31mERROR: Zip decompression failed\033[0m {e}")
+                    return sha_hex, False
+            else:
+                print(f"\033[31mERROR: unknown archive type\033[0m {content[:2].decode()}")
+                return sha_hex, False
+
+            # Calculate the SHA1 hash of the decompressed content
+            from hashlib import sha1
+            calculated_sha = sha1(decompressed).hexdigest()
+
+            # Compare the calculated SHA1 with the expected SHA1
+            return sha_hex, (calculated_sha == sha_hex)
+        except Exception as e:
+            print(f"Error validating chunk {sha_hex}: {e}")
+            return sha_hex, False
 
 if __name__ == "__main__":
     if len(argv) > 1:
