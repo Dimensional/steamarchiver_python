@@ -78,7 +78,10 @@ class Chunkstore():
 
     def _load_existing_files(self):
         """Loads existing CSD/CSM pairs for the depot and rebuilds the SQLite database."""
-        for filename in sorted(f for f in os.listdir(self.folder) if f.startswith(f"{self.depot}_") and f.endswith(".csm")):
+        for filename in sorted(
+            (f for f in os.listdir(self.folder) if f.startswith(f"{self.depot}_") and f.endswith(".csm")),
+            key=lambda x: int(x.split("_")[-1].split(".")[0])  # Extract numeric part for sorting
+        ):
             base_name = filename.replace(".csm", "")
             csd_path = path.join(self.folder, base_name + ".csd")
             csm_path = path.join(self.folder, base_name + ".csm")
