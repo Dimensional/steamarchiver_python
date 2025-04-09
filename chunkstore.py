@@ -11,6 +11,9 @@ from zipfile import BadZipFile, ZipFile
 import lzma
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+
+_LOG = logging.getLogger("Chunkstore")
 
 class Chunkstore():
     def __init__(self, folder, depot=None, is_encrypted=None, max_file_size=2**30): # Limits to 1GB per file
@@ -35,6 +38,8 @@ class Chunkstore():
         self.current_file_index = 0
         self.current_file_size = 0
         self._thread_local = threading.local()  # Thread-local storage for SQLite connections
+        self._file_handles = {}
+        self._file_handles_lock = threading.Lock()  # Lock for file handles
 
         if not path.exists(self.folder):
             raise Exception(f"Folder {self.folder} does not exist")
@@ -45,6 +50,13 @@ class Chunkstore():
 
         # Load existing files after the database is initialized
         self._load_existing_files_to_connection(self.conn)
+
+    def _get_file_handle(self, csd_path):
+        """Gets or opens a file handle for the given chunkstore file."""
+        with self._file_handles_lock:
+            if csd_path not in self._file_handles:
+                self._file_handles[csd_path] = open(csd_path, "rb")
+            return self._file_handles[csd_path]
 
     def __repr__(self):
         """Returns a string representation of the Chunkstore instance."""
@@ -228,29 +240,84 @@ class Chunkstore():
                 csmfile.write(unhexlify(sha))
                 csmfile.write(pack("<Q L L", offset, 0, length))
 
-    def get_chunk(self, sha_hex):
+    def get_chunk(self, sha_hex, process=False, depot_key=None):
         """Retrieves the content of a chunk by its SHA1 hash.
 
         Args:
             sha_hex (str): The SHA1 hash of the chunk in hexadecimal format.
+            process (bool, optional): Whether to process (decrypt and decompress) the chunk. Defaults to False.
+            depot_key (bytes, optional): Key used to decrypt encrypted chunks.
 
         Returns:
             bytes: The content of the chunk.
 
         Raises:
             KeyError: If the chunk is not found.
+            ValueError: If processing fails or the SHA1 checksum does not match.
         """
+        conn = None
         # Retrieve metadata from SQLite
         conn = self._get_thread_local_connection()
         cursor = conn.execute("SELECT chunkstore_index, offset, length FROM chunks WHERE sha = ?", (sha_hex,))
+        print(f"Processing chunk: {sha_hex}")
         result = cursor.fetchone()
         if not result:
             raise KeyError(f"Chunk {sha_hex} not found")
         chunkstore_index, offset, length = result
         csd_path, _ = self.files[chunkstore_index - 1]
-        with open(csd_path, "rb") as csdfile:
+        csdfile = self._get_file_handle(csd_path)  # Reuse the file handle
+        with threading.Lock():  # Ensure thread-safe seek and read
+        #with open(csd_path, "rb") as csdfile:
             csdfile.seek(offset)
-            return csdfile.read(length)
+            content = csdfile.read(length)
+            if process:
+                return self.process_chunks(sha_hex, content, depot_key)
+            return content
+
+    def process_chunks(self, sha_hex, content, depot_key=None):
+        try:
+            if self.is_encrypted and depot_key:
+                content = symmetric_decrypt(content, depot_key)
+                        
+            if content[:2] == b'VZ':  # LZMA
+                print("Extracting (LZMA) from chunk", sha_hex)
+                try:
+                    decompressed_size = unpack('<i', content[-6:-2])[0]
+                    decompressed = lzma.LZMADecompressor(
+                        lzma.FORMAT_RAW,
+                        filters=[lzma._decode_filter_properties(lzma.FILTER_LZMA1, content[7:12])]
+                    ).decompress(content[12:-10])[:decompressed_size]
+                except lzma.LZMAError as e:
+                    _LOG.error(f"LZMA decompression failed for chunk {sha_hex}: {e}")
+                    raise ValueError(f"LZMA decompression failed for chunk {sha_hex}: {e}")
+            elif content[:2] == b'PK':  # Zip
+                print("Extracting (Zip) from chunk", sha_hex)
+                try:
+                    with ZipFile(BytesIO(content)) as zipfile:
+                        decompressed = zipfile.read(zipfile.filelist[0])
+                except BadZipFile as e:
+                    _LOG.error(f"Zip decompression failed for chunk {sha_hex}: {e}")
+                    raise ValueError(f"Zip decompression failed for chunk {sha_hex}: {e}")
+                except Exception as e:
+                    _LOG.error(f"Unknown error during Zip decompression for chunk {sha_hex}: {e}")
+                    raise ValueError(f"Unknown error during Zip decompression for chunk {sha_hex}: {e}")
+            else:
+                _LOG.error(f"Unknown archive type for chunk {sha_hex}: {content[:2].decode()}")
+                raise ValueError(f"Unknown archive type for chunk {sha_hex}: {content[:2].decode()}")
+
+            # Calculate the SHA1 hash of the decompressed content
+            from hashlib import sha1
+            calculated_sha = sha1(decompressed).hexdigest()
+
+            # Compare the calculated SHA1 with the expected SHA1
+            if calculated_sha != sha_hex:
+                _LOG.error(f"SHA1 mismatch for chunk {sha_hex}: expected {sha_hex}, got {calculated_sha}")
+                raise ValueError(f"SHA1 mismatch for chunk {sha_hex}: expected {sha_hex}, got {calculated_sha}")
+                        
+            return decompressed
+        except Exception as e:
+            _LOG.error(f"Error processing chunk {sha_hex}: {e}")
+            raise ValueError(f"Error processing chunk {sha_hex}: {e}")
 
     def unpack(self, output_folder):
         """Unpacks all files from the chunkstore into the specified output folder.
@@ -315,6 +382,11 @@ class Chunkstore():
             self._thread_local.conn.close()
             self._thread_local.conn = None
             print("Thread-local SQLite connection closed.")
+            
+        with self._file_handles_lock:
+            for file_handle in self._file_handles.values():
+                file_handle.close()
+            self._file_handles.clear()
 
     def debug_export_csv(self, output_csv_path):
         """Exports the SQLite database records to a CSV file for debugging purposes.
@@ -389,7 +461,9 @@ class Chunkstore():
                 return sha_hex, False
             chunkstore_index, offset, length = result
             csd_path, _ = self.files[chunkstore_index - 1]
-            with open(csd_path, "rb") as csdfile:
+            csdfile = self._get_file_handle(csd_path)  # Reuse the file handle
+            with threading.Lock():  # Ensure thread-safe seek and read
+            #with open(csd_path, "rb") as csdfile:
                 csdfile.seek(offset)
                 content = csdfile.read(length)
 
@@ -438,6 +512,14 @@ class Chunkstore():
             if hasattr(self._thread_local, "conn"):
                 self._thread_local.conn.close()
                 del self._thread_local.conn
+
+    def get_chunks_metadata(self, sha_list):
+        """Fetches metadata for multiple chunks in a single query."""
+        conn = self._get_thread_local_connection()
+        placeholders = ",".join("?" for _ in sha_list)
+        query = f"SELECT sha, chunkstore_index, offset, length FROM chunks WHERE sha IN ({placeholders})"
+        cursor = conn.execute(query, sha_list)
+        return {row[0]: row[1:] for row in cursor.fetchall()}
 
 if __name__ == "__main__":
     if len(argv) > 1:
