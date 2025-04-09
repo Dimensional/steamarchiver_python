@@ -215,7 +215,8 @@ class Chunkstore():
 
     def _write_csm_metadata(self, index, csm_path):
         """Writes metadata to a specific CSM file."""
-        with open(csm_path, "ab") as csmfile:  # Open in append mode to add metadata
+        with open(csm_path, "r+b") as csmfile:  # Open in write mode to overwrite metadata
+            csmfile.seek(12)  # Skip the header (12 bytes)
             cursor = self.conn.execute("""
                 SELECT sha, offset, length FROM chunks
                 WHERE chunkstore_index = ?
@@ -240,7 +241,8 @@ class Chunkstore():
             KeyError: If the chunk is not found.
         """
         # Retrieve metadata from SQLite
-        cursor = self.conn.execute("SELECT chunkstore_index, offset, length FROM chunks WHERE sha = ?", (sha_hex,))
+        conn = self._get_thread_local_connection()
+        cursor = conn.execute("SELECT chunkstore_index, offset, length FROM chunks WHERE sha = ?", (sha_hex,))
         result = cursor.fetchone()
         if not result:
             raise KeyError(f"Chunk {sha_hex} not found")
