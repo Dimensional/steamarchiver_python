@@ -152,9 +152,9 @@ if __name__ == "__main__":
             chunkstore = Chunkstore(args.backup, args.depotid)
             chunklist = chunkstore.validate_chunks(depot_key=args.depotkey, threads=args.threads)
             print("Bad Files:")
-            # for sha, valid in chunklist.items():
-            #     if not valid:
-            #         print(sha)
+            for sha, valid in chunklist.items():
+                if not valid:
+                    print(sha)
         finally:
             chunkstore.close()
     # elif args.manifests:

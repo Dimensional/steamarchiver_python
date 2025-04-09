@@ -433,6 +433,11 @@ class Chunkstore():
         except Exception as e:
             print(f"Error validating chunk {sha_hex}: {e}")
             return sha_hex, False
+        finally:
+            # Ensure the thread-local connection is closed after processing
+            if hasattr(self._thread_local, "conn"):
+                self._thread_local.conn.close()
+                del self._thread_local.conn
 
 if __name__ == "__main__":
     if len(argv) > 1:
