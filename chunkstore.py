@@ -335,10 +335,14 @@ class Chunkstore():
                 raise Exception(f"Failed to create output folder: {output_folder}") from e
 
         # Query all chunks from the SQLite database
-        cursor = self.conn.execute("SELECT sha FROM chunks")  # Fixed the SQL query
-        for sha_hex, in cursor.fetchall():  # Unpack the single-column result
+        cursor = self.conn.execute("SELECT sha, chunkstore_index, offset, length FROM chunks")  # Fetch all records
+        for row in cursor.fetchall():  # Iterate through all rows in the result
             # Retrieve the file content using get_chunk
-            content = self.get_chunk(sha_hex)  # Pass sha_hex directly to get_chunk
+            sha_hex, chunkstore_index, offset, length = row
+            csd_path, _ = self.files[chunkstore_index - 1]
+            with open(csd_path, "rb") as csdfile:
+                csdfile.seek(offset)
+                content = csdfile.read(length)
 
             # Save the file to the output folder
             output_path = path.join(output_folder, sha_hex)
