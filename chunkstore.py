@@ -16,7 +16,7 @@ import logging
 _LOG = logging.getLogger("Chunkstore")
 
 class Chunkstore():
-    def __init__(self, folder, depot=None, is_encrypted=None, max_file_size=2**30): # Limits to 1GB per file
+    def __init__(self, folder, depot=None, depot_key=None, is_encrypted=None, max_file_size=2**30): # Limits to 1GB per file
         """Initializes the Chunkstore class.
 
         Args:
@@ -29,6 +29,7 @@ class Chunkstore():
             Exception: If the specified folder does not exist.
         """
         self.folder = folder
+        self.depot_key = depot_key
         self.depot = depot
         self.is_encrypted = is_encrypted
         self.max_file_size = max_file_size
@@ -240,6 +241,51 @@ class Chunkstore():
                 csmfile.write(unhexlify(sha))
                 csmfile.write(pack("<Q L L", offset, 0, length))
 
+    def grab_chunk(self, chunk, depotkey=None):
+        sha, chunkstore_index, offset, length = chunk
+        csd_path, _ = self.files[chunkstore_index - 1]
+        csdfile = self._get_file_handle(csd_path)
+        with threading.Lock():  # Ensure thread-safe seek and read
+            csdfile.seek(offset)
+            data = csdfile.read(length)
+            return sha, self.process_chunks(sha, data, depotkey)
+
+    def get_chunks(self, file, final_file, depotkey=None, threads=None):
+        filename = file.filename
+        final_file_path = os.path.normpath(final_file)
+        incomplete_file_path = os.path.normpath(f"{final_file_path}.incomplete")
+        conn = self._get_thread_local_connection()
+        sha_list = [hexlify(chunk.sha).decode() for chunk in file.chunks]
+        sha_data = {}
+        sha_offsets = {hexlify(chunk.sha).decode(): chunk.offset for chunk in file.chunks}
+        result = conn.execute(
+            "SELECT sha, chunkstore_index, offset, length FROM chunks WHERE sha IN ({})".format(
+                ",".join("?" for _ in sha_list)
+            ),
+            sha_list
+        ).fetchall()
+        if threads is None:
+            threads = max(1, os.cpu_count() - 1)
+        else:
+            threads = max(1, min(threads, os.cpu_count()))
+
+        try:
+            with ThreadPoolExecutor(max_workers=threads) as executor:
+                future_to_chunk = {
+                    executor.submit(self.grab_chunk, chunk, depotkey)
+                    for chunk in result
+                }
+                for future in as_completed(future_to_chunk):
+                    with open(incomplete_file_path, "r+b") as output_file:
+                        for future in as_completed(future_to_chunk):
+                            sha, content = future.result()
+                            output_file.seek(sha_offsets[sha])
+                            output_file.write(content)
+            os.rename(incomplete_file_path, final_file_path)
+            print(f"File reconstructed: {filename}")
+        except Exception as e:
+            raise Exception(f"Error reconstructing file {filename}: {e}")
+
     def get_chunk(self, sha_hex, process=False, depot_key=None):
         """Retrieves the content of a chunk by its SHA1 hash.
 
@@ -259,7 +305,6 @@ class Chunkstore():
         # Retrieve metadata from SQLite
         conn = self._get_thread_local_connection()
         cursor = conn.execute("SELECT chunkstore_index, offset, length FROM chunks WHERE sha = ?", (sha_hex,))
-        print(f"Processing chunk: {sha_hex}")
         result = cursor.fetchone()
         if not result:
             raise KeyError(f"Chunk {sha_hex} not found")
@@ -267,7 +312,6 @@ class Chunkstore():
         csd_path, _ = self.files[chunkstore_index - 1]
         csdfile = self._get_file_handle(csd_path)  # Reuse the file handle
         with threading.Lock():  # Ensure thread-safe seek and read
-        #with open(csd_path, "rb") as csdfile:
             csdfile.seek(offset)
             content = csdfile.read(length)
             if process:
@@ -311,7 +355,7 @@ class Chunkstore():
 
             # Compare the calculated SHA1 with the expected SHA1
             if calculated_sha != sha_hex:
-                _LOG.error(f"SHA1 mismatch for chunk {sha_hex}: expected {sha_hex}, got {calculated_sha}")
+                print(f"SHA1 mismatch for chunk {sha_hex}: expected {sha_hex}, got {calculated_sha}")
                 raise ValueError(f"SHA1 mismatch for chunk {sha_hex}: expected {sha_hex}, got {calculated_sha}")
                         
             return decompressed
@@ -340,7 +384,8 @@ class Chunkstore():
             # Retrieve the file content using get_chunk
             sha_hex, chunkstore_index, offset, length = row
             csd_path, _ = self.files[chunkstore_index - 1]
-            with open(csd_path, "rb") as csdfile:
+            csdfile = self._get_file_handle(csd_path)  # Reuse the file handle
+            with threading.Lock():  # Ensure thread-safe seek and read
                 csdfile.seek(offset)
                 content = csdfile.read(length)
 
@@ -411,7 +456,7 @@ class Chunkstore():
         except Exception as e:
             raise Exception(f"Failed to export debug CSV: {e}")
 
-    def validate_chunks(self, chunk_list=None, depot_key=None, threads=None):
+    def validate_chunks(self, chunk_list=None, threads=None):
         """Validates the integrity of chunks in the chunkstore.
 
         Args:
@@ -434,19 +479,20 @@ class Chunkstore():
         # If no specific chunks are provided, validate all chunks in the chunkstore
         if chunk_list is None:
             conn = self._get_thread_local_connection()
-            cursor = conn.execute("SELECT sha FROM chunks")
-            chunk_list = [row[0] for row in cursor.fetchall()]
-
-        # Use ThreadPoolExecutor to validate chunks in parallel
-        with ThreadPoolExecutor(max_workers=threads) as executor:
-            future_to_sha = {executor.submit(self._validate_single_chunk, sha_hex, depot_key): sha_hex for sha_hex in chunk_list}
-            for future in as_completed(future_to_sha):
-                sha_hex, result = future.result()
-                validation_results[sha_hex] = result
+            cursor = conn.execute("SELECT sha, chunkstore_index, offset, length FROM chunks")  # Fetch all records
+            # Use ThreadPoolExecutor to validate chunks in parallel
+            with ThreadPoolExecutor(max_workers=threads) as executor:
+                future_to_sha = {
+                    executor.submit(self._validate_single_chunk, sha_hex, chunkstore_index, offset, length, self.depot_key): sha_hex
+                    for sha_hex, chunkstore_index, offset, length in cursor.fetchall()
+                }
+                for future in as_completed(future_to_sha):
+                    sha_hex, result = future.result()
+                    validation_results[sha_hex] = result
 
         return validation_results
 
-    def _validate_single_chunk(self, sha_hex, depot_key):
+    def _validate_single_chunk(self, sha_hex, chunkstore_index, offset, length, depot_key):
         """Validates a single chunk.
 
         Args:
@@ -457,17 +503,9 @@ class Chunkstore():
             tuple: A tuple containing the SHA1 hash and the validation result (True/False).
         """
         try:
-            # Retrieve the chunk content using a thread-local connection
-            conn = self._get_thread_local_connection()
-            cursor = conn.execute("SELECT chunkstore_index, offset, length FROM chunks WHERE sha = ?", (sha_hex,))
-            result = cursor.fetchone()
-            if not result:
-                return sha_hex, False
-            chunkstore_index, offset, length = result
             csd_path, _ = self.files[chunkstore_index - 1]
             csdfile = self._get_file_handle(csd_path)  # Reuse the file handle
             with threading.Lock():  # Ensure thread-safe seek and read
-            #with open(csd_path, "rb") as csdfile:
                 csdfile.seek(offset)
                 content = csdfile.read(length)
 

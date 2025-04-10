@@ -189,7 +189,7 @@ if __name__ == "__main__":
     
     manifest = setup_manifest_and_keys(args)
 
-    chunkstore = Chunkstore(args.backup, args.depotid) if args.backup else None
+    chunkstore = Chunkstore(args.backup, args.depotid, depot_key=args.depotkey) if args.backup else None
     output_dir_parent = join(args.dest, str(args.depotid))
     output_dir = join(output_dir_parent, str(args.manifestid))
     if not args.dry_run:
@@ -253,56 +253,63 @@ if __name__ == "__main__":
             try:
                 if args.backup:
                     if not args.dry_run:
-                        with ThreadPoolExecutor(max_workers=args.max_threads) as executor:
-                            futures = [
-                                executor.submit(
-                                    lambda chunk: (
-                                        chunk.offset, 
-                                        chunkstore.get_chunk(hexlify(chunk.sha).decode(), process=True, depot_key=args.depotkey), 
-                                        hexlify(chunk.sha).decode() # Ensure chunk.sha is hex-encoded and decoded
-                                        ),
-                                    chunk
-                                )
-                                for chunk in sorted(file.chunks, key=lambda chunk: chunk.offset)
-                                if hexlify(chunk.sha).decode() # Ensure filtering uses the hex-encoded string
-                            ]
-                            pq = PriorityQueue()
-                            for future in as_completed(futures):
-                                try:
-                                    result = future.result()
-                                    if result is not None:
-                                        pq.put(result)
-                                except Exception as e:
-                                    _LOG.error(f"Error in thread: {e}")
-                                    # Cancel all remaining threads
-                                    for f in futures:
-                                        f.cancel()
-                                    raise e  # Propagate the error to terminate the process
-                        retries = 5
-                        for attempt in range(retries):
-                            try:
-                                with open(incomplete_file_path, "r+b") as f:
-                                    while not pq.empty():
-                                        offset, decompressed, chunkhex = pq.get()
-                                        f.seek(offset)
-                                        f.write(decompressed)
-                                        _LOG.info(f"Extracted {file.filename} from chunk {chunkhex}")
-                                # Rename the incomplete file based on processing results
-                                if pq.empty():
-                                    Path(incomplete_file_path).rename(final_file_path)
-                                    # Validate the SHA-1 checksum of the output file if requested
-                                    if args.validate:
-                                        if validate_file(final_file_path, hexlify(file.sha_content).decode()):
-                                            print(f"File {file.filename} is \033[92m\033[1mvalid\033[0m.")
-                                        else:
-                                            print(f"File {file.filename} is \033[91m\033[1minvalid\033[0m.")
-                                            Path(final_file_path).rename(final_file_path + ".corrupt")
-                                break
-                            except PermissionError as e:
-                                if attempt < retries - 1:
-                                    time.sleep(1)  # Wait for 1 second before retrying
-                                else:
-                                    raise e
+                        chunkstore.get_chunks(file, final_file_path, depotkey=args.depotkey, threads=args.max_threads)
+                        if args.validate:
+                            if validate_file(final_file_path, hexlify(file.sha_content).decode()):
+                                print(f"File {file.filename} is \033[92m\033[1mvalid\033[0m.")
+                            else:
+                                print(f"File {file.filename} is \033[91m\033[1minvalid\033[0m.")
+                                Path(final_file_path).rename(final_file_path + ".corrupt")
+                        # with ThreadPoolExecutor(max_workers=args.max_threads) as executor:
+                        #     futures = [
+                        #         executor.submit(
+                        #             lambda chunk: (
+                        #                 chunk.offset, 
+                        #                 chunkstore.get_chunk(hexlify(chunk.sha).decode(), process=True, depot_key=args.depotkey), 
+                        #                 hexlify(chunk.sha).decode() # Ensure chunk.sha is hex-encoded and decoded
+                        #                 ),
+                        #             chunk
+                        #         )
+                        #         for chunk in sorted(file.chunks, key=lambda chunk: chunk.offset)
+                        #         if hexlify(chunk.sha).decode() # Ensure filtering uses the hex-encoded string
+                        #     ]
+                        #     pq = PriorityQueue()
+                        #     for future in as_completed(futures):
+                        #         try:
+                        #             result = future.result()
+                        #             if result is not None:
+                        #                 pq.put(result)
+                        #         except Exception as e:
+                        #             _LOG.error(f"Error in thread: {e}")
+                        #             # Cancel all remaining threads
+                        #             for f in futures:
+                        #                 f.cancel()
+                        #             raise e  # Propagate the error to terminate the process
+                        # retries = 5
+                        # for attempt in range(retries):
+                        #     try:
+                        #         with open(incomplete_file_path, "r+b") as f:
+                        #             while not pq.empty():
+                        #                 offset, decompressed, chunkhex = pq.get()
+                        #                 f.seek(offset)
+                        #                 f.write(decompressed)
+                        #                 _LOG.info(f"Extracted {file.filename} from chunk {chunkhex}")
+                        #         # Rename the incomplete file based on processing results
+                        #         if pq.empty():
+                        #             Path(incomplete_file_path).rename(final_file_path)
+                        #             # Validate the SHA-1 checksum of the output file if requested
+                        #             if args.validate:
+                        #                 if validate_file(final_file_path, hexlify(file.sha_content).decode()):
+                        #                     print(f"File {file.filename} is \033[92m\033[1mvalid\033[0m.")
+                        #                 else:
+                        #                     print(f"File {file.filename} is \033[91m\033[1minvalid\033[0m.")
+                        #                     Path(final_file_path).rename(final_file_path + ".corrupt")
+                        #         break
+                        #     except PermissionError as e:
+                        #         if attempt < retries - 1:
+                        #             time.sleep(1)  # Wait for 1 second before retrying
+                        #         else:
+                        #             raise e
                 else:
                     #path = f"./depot/{args.depotid}"
                     chunk_path = join("./depot", str(args.depotid), "chunk/")
