@@ -38,9 +38,6 @@ class Chunkstore():
         self.current_csd = None
         self.current_file_index = 0
         self.current_file_size = 0
-        self._thread_local = threading.local()  # Thread-local storage for SQLite connections
-        self._file_handles = {}
-        self._file_handles_lock = threading.Lock()  # Lock for file handles
 
         if not path.exists(self.folder):
             raise Exception(f"Folder {self.folder} does not exist")
@@ -49,15 +46,12 @@ class Chunkstore():
         self.conn = sqlite3.connect(":memory:")
         self._init_database(self.conn)
 
+        self._thread_local = threading.local()  # Thread-local storage for SQLite connections
+        self._thread_local_registry = {}  # Shared registry for all thread-local connections
+        self._thread_local_lock = threading.Lock()  # Lock for thread-local registry
+
         # Load existing files after the database is initialized
         self._load_existing_files_to_connection(self.conn)
-
-    def _get_file_handle(self, csd_path):
-        """Gets or opens a file handle for the given chunkstore file."""
-        with self._file_handles_lock:
-            if csd_path not in self._file_handles:
-                self._file_handles[csd_path] = open(csd_path, "rb")
-            return self._file_handles[csd_path]
 
     def __repr__(self):
         """Returns a string representation of the Chunkstore instance."""
@@ -74,6 +68,9 @@ class Chunkstore():
             self._thread_local.conn = sqlite3.connect(":memory:")
             self._init_database(self._thread_local.conn)
             self._load_existing_files_to_connection(self._thread_local.conn)
+            # Register the connection in the shared registry
+            with self._thread_local_lock:
+                self._thread_local_registry[threading.get_ident()] = self._thread_local.conn
         return self._thread_local.conn
 
     def _init_database(self, conn):
@@ -88,6 +85,8 @@ class Chunkstore():
         """)
         conn.execute("CREATE INDEX idx_sha ON chunks (sha)")
 
+    ### Checks if all existing CSM files have consistent headers and encryption flags.
+    ### This method is called when loading existing files to ensure that all files are either encrypted or decrypted.
     def _check_encryption_consistency(self):
         """Checks if all existing CSM files have consistent headers and encryption flags."""
         for _, csm_path in self.files:
@@ -104,6 +103,10 @@ class Chunkstore():
                     raise Exception(f"Encryption mismatch in file {csm_path}. "
                                     f"Expected {'encrypted' if self.is_encrypted else 'decrypted'}.")
 
+    ### Loads existing CSD/CSM pairs for the depot and rebuilds the SQLite database.
+    ### This method is called when initializing the Chunkstore or when loading existing files.
+    ### It checks for encryption consistency and calls _parse_csm_metadata_to_connection to parse metadata.
+    ### The metadata is then inserted into the SQLite database.
     def _load_existing_files_to_connection(self, conn):
         """Loads existing CSD/CSM pairs for the depot and rebuilds the SQLite database."""
         for filename in sorted(
@@ -130,6 +133,8 @@ class Chunkstore():
             self.current_csd, self.current_csm = self.files[-1]
             self.current_file_size = path.getsize(self.current_csd)
 
+    ### Parses metadata from a CSM file and populates the SQLite database for a given connection.
+    ### This method is called when loading existing CSM files to rebuild the SQLite database.
     def _parse_csm_metadata_to_connection(self, csm_path, chunkstore_index, conn):
         """Parses metadata from a CSM file and populates the SQLite database for a given connection."""
         with open(csm_path, "rb") as csmfile:
@@ -150,6 +155,8 @@ class Chunkstore():
                 """, (sha, chunkstore_index, offset, length))
             conn.commit()
 
+    ### When creating new CSM files, this method is called to write the common header.
+    ### The header consists of a magic number, a version number, and an encryption flag.
     def _write_csm_header(self, csmfile):
         """Writes the common header for a CSM file."""
         csmfile.write(b"SCFS\x14\x00\x00\x00")  # 8 bytes
@@ -157,6 +164,8 @@ class Chunkstore():
             raise Exception("Encryption status (is_encrypted) must be set before writing CSM headers.")
         csmfile.write(b"\x03\x00\x00\x00" if self.is_encrypted else b"\x02\x00\x00\x00")  # 4 bytes
 
+    ### Creates a new CSD/CSM pair and calls _write_csm_header to write the header to the CSM file.
+    ### This method is responsible for creating a new chunkstore file when the current one would exceed the maximum size.
     def _create_new_file(self):
         """Creates a new CSD/CSM pair and writes the header to the CSM file."""
         if self.current_file_index > 0:  # If there is an existing file, finalize its CSM
@@ -171,61 +180,9 @@ class Chunkstore():
         with open(self.current_csm, "wb") as csmfile:
             self._write_csm_header(csmfile)
 
-    def file_exists(self, sha):
-        """Checks if a file with the given SHA1 already exists in the chunkstore.
-
-        Args:
-            sha (bytes): The SHA1 hash of the file to check.
-
-        Returns:
-            bool: True if the file exists, False otherwise.
-        """
-        sha_hex = hexlify(sha).decode()
-        cursor = self.conn.execute("SELECT 1 FROM chunks WHERE sha = ?", (sha_hex,))
-        return cursor.fetchone() is not None
-
-    def write_chunk(self, sha, content):
-        """Writes a chunk to the appropriate CSD/CSM pair, skipping duplicates.
-
-        Args:
-            sha (bytes): The SHA1 hash of the file.
-            content (bytes): The file content to write.
-
-        Returns:
-            bool: True if the file was added, False if it was skipped.
-        """
-        if self.file_exists(sha):
-            # Skip the file if it already exists
-            return False
-
-        # Write a chunk to the appropriate CSD/CSM pair
-        if not self.current_csd or self.current_file_size + len(content) > self.max_file_size:
-            self._create_new_file()
-
-        with open(self.current_csd, "ab") as csdfile:
-            offset = csdfile.tell()
-            csdfile.write(content)
-            length = len(content)
-            self.current_file_size += length
-
-        # Insert metadata into SQLite
-        self.conn.execute("""
-            INSERT OR REPLACE INTO chunks (sha, chunkstore_index, offset, length)
-            VALUES (?, ?, ?, ?)
-        """, (hexlify(sha).decode(), self.current_file_index, offset, length))
-        self.conn.commit()
-
-        return True
-
-    def write_csm(self, index=None):
-        """Writes metadata to the CSM files for all or a specific chunkstore."""
-        if index is None:  # Write all CSM files
-            for idx, (csd_path, csm_path) in enumerate(self.files, start=1):
-                self._write_csm_metadata(idx, csm_path)
-        else:  # Write a specific CSM file
-            _, csm_path = self.files[index - 1]
-            self._write_csm_metadata(index, csm_path)
-
+    ### Only called from write_csm.
+    ### Writes metadata to a specific CSM file for the given chunkstore index.
+    ### This method is responsible for writing the chunk metadata to the CSM file.
     def _write_csm_metadata(self, index, csm_path):
         """Writes metadata to a specific CSM file."""
         with open(csm_path, "r+b") as csmfile:  # Open in write mode to overwrite metadata
@@ -241,15 +198,36 @@ class Chunkstore():
                 csmfile.write(unhexlify(sha))
                 csmfile.write(pack("<Q L L", offset, 0, length))
 
+    ### Checks if a file with the given SHA1 already exists in the chunkstore.
+    ### This method is used to avoid duplicates when writing chunks, something that shouldn't happen at all.
+    def file_exists(self, sha):
+        """Checks if a file with the given SHA1 already exists in the chunkstore.
+
+        Args:
+            sha (bytes): The SHA1 hash of the file to check.
+
+        Returns:
+            bool: True if the file exists, False otherwise.
+        """
+        sha_hex = hexlify(sha).decode()
+        cursor = self.conn.execute("SELECT 1 FROM chunks WHERE sha = ?", (sha_hex,))
+        return cursor.fetchone() is not None
+
+    ## Retrieves a chunk from the chunkstore and processes it (decrypts and decompresses).
+    ## This method is called by the ThreadPoolExecutor to process chunks in parallel.
+    ## It uses the same logic as get_chunk, but processes multiple chunks at once
+    ## from a single SQL query result.
     def grab_chunk(self, chunk, depotkey=None):
         sha, chunkstore_index, offset, length = chunk
         csd_path, _ = self.files[chunkstore_index - 1]
-        csdfile = self._get_file_handle(csd_path)
-        with threading.Lock():  # Ensure thread-safe seek and read
+        with open(csd_path, "rb") as csdfile:  # Open a new file handle for this thread
             csdfile.seek(offset)
             data = csdfile.read(length)
             return sha, self.process_chunks(sha, data, depotkey)
 
+    ## Reconstructs a file from its chunks and writes it to the specified final file path.
+    ## The file is reconstructed in a temporary incomplete file and then renamed to the final file path.
+    ## Calls grab_chunks because it uses a list generated from a single sql query
     def get_chunks(self, file, final_file, depotkey=None, threads=None):
         filename = file.filename
         final_file_path = os.path.normpath(final_file)
@@ -286,6 +264,10 @@ class Chunkstore():
         except Exception as e:
             raise Exception(f"Error reconstructing file {filename}: {e}")
 
+    ## Retrieves the content of a chunk by its SHA1 hash from the SQLite database.
+    ## If process is True, it will decrypt and decompress the chunk content.
+    ## Difference between this and get_chunks is that this method only retrieves a single chunk,
+    ## while get_chunks retrieves multiple chunks and reconstructs a file.
     def get_chunk(self, sha_hex, process=False, depot_key=None):
         """Retrieves the content of a chunk by its SHA1 hash.
 
@@ -310,14 +292,55 @@ class Chunkstore():
             raise KeyError(f"Chunk {sha_hex} not found")
         chunkstore_index, offset, length = result
         csd_path, _ = self.files[chunkstore_index - 1]
-        csdfile = self._get_file_handle(csd_path)  # Reuse the file handle
-        with threading.Lock():  # Ensure thread-safe seek and read
+        with open(csd_path, "rb") as csdfile:  # Open a new file handle for this thread
             csdfile.seek(offset)
             content = csdfile.read(length)
             if process:
                 return self.process_chunks(sha_hex, content, depot_key)
             return content
 
+    ## Retrieves the file information (index and size) for each chunkstore file.
+    ## This method is called to get the file information for all chunkstore files.
+    def get_chunkstore_file_info(self):
+        file_info = {}
+        for index, (csd_path, _) in enumerate(self.files, start=1):
+            file_size = path.getsize(csd_path)
+            file_info[index] = file_size
+        return file_info
+
+    ## Used to package every loose chunk into the chunkstore for the depot.
+    ## This method is called by the pack method to process each file in the input_files list.
+    ## It passes each file to the write_chunk method to add it to the chunkstore.
+    def pack(self, input_files):
+        """Packages the specified list of files into the chunkstore.
+
+        Args:
+            input_files (list): List of file paths to be added. File names must be SHA1s.
+
+        Raises:
+            Exception: If any file in the list does not exist or has an invalid name.
+        """
+        
+        for file_path in input_files:
+            if not path.isfile(file_path):
+                raise Exception(f"File {file_path} does not exist or is not a valid file")
+
+            sha = path.basename(file_path)  # Use the file name as the SHA
+            if not self.is_encrypted and sha.endswith("_decrypted"):
+                sha = sha.replace("_decrypted", "")  # Remove "_decrypted" suffix if not encrypted
+            if len(sha) != 40 or not all(c in "0123456789abcdef" for c in sha.lower()):
+                raise Exception(f"Invalid SHA1 file name: {file_path}")
+
+            with open(file_path, "rb") as file:
+                content = file.read()
+                self.write_chunk(unhexlify(sha), content)
+                print(f"Packed file: {file_path}")
+        
+        if self.current_file_index > 0:
+            self.write_csm(index=self.current_file_index)
+
+    ### Processes a chunk by decrypting and decompressing it based on its type.
+    ### This method is called by the get_chunk and grab_chunk methods to handle chunk processing.
     def process_chunks(self, sha_hex, content, depot_key=None):
         try:
             if self.is_encrypted and depot_key:
@@ -363,11 +386,46 @@ class Chunkstore():
             _LOG.error(f"Error processing chunk {sha_hex}: {e}")
             raise ValueError(f"Error processing chunk {sha_hex}: {e}")
 
-    def unpack(self, output_folder):
-        """Unpacks all files from the chunkstore into the specified output folder.
+    ### Unpacks a single chunk to the specified output folder.
+    ### This method is called by the unpack method to process each chunk in parallel.
+    def unpack_chunks(self, sha_hex, chunkstore_index, offset, length, output_folder):
+        """Processes and unpacks a single chunk to the specified output folder.
+
+        Args:
+            sha_hex (str): The SHA1 hash of the chunk.
+            chunkstore_index (int): The index of the chunkstore file.
+            offset (int): The offset of the chunk in the file.
+            length (int): The length of the chunk.
+            output_folder (str): Path to the folder where the chunk will be saved.
+
+        Raises:
+            Exception: If there is an error unpacking the chunk.
+        """
+        if not self.is_encrypted:
+            sha_hex += "_decrypted"  # Append "_decrypted" if not encrypted
+        csd_path, _ = self.files[chunkstore_index - 1]
+        
+        output_path = path.join(output_folder, sha_hex)
+        if path.exists(output_path):
+            return
+        
+        with open(csd_path, "rb") as csdfile:
+            csdfile.seek(offset)
+            content = csdfile.read(length)
+
+        # Save the chunk to the output folder
+        with open(output_path, "wb") as output_file:
+            output_file.write(content)
+        print(f"Unpacked file: {output_path}")
+
+    ### Unpacks all files from the chunkstore into the specified output folder using multithreading.
+    ### This method is called to process each chunk in parallel using ThreadPoolExecutor.
+    def unpack(self, output_folder, threads=None):
+        """Unpacks all files from the chunkstore into the specified output folder using multithreading.
 
         Args:
             output_folder (str): Path to the folder where unpacked files will be saved.
+            threads (int, optional): Maximum number of threads to use for parallel processing. Defaults to CPU count.
 
         Raises:
             Exception: If the output folder does not exist and cannot be created.
@@ -379,45 +437,78 @@ class Chunkstore():
                 raise Exception(f"Failed to create output folder: {output_folder}") from e
 
         # Query all chunks from the SQLite database
-        cursor = self.conn.execute("SELECT sha, chunkstore_index, offset, length FROM chunks")  # Fetch all records
-        for row in cursor.fetchall():  # Iterate through all rows in the result
-            # Retrieve the file content using get_chunk
-            sha_hex, chunkstore_index, offset, length = row
-            csd_path, _ = self.files[chunkstore_index - 1]
-            csdfile = self._get_file_handle(csd_path)  # Reuse the file handle
-            with threading.Lock():  # Ensure thread-safe seek and read
-                csdfile.seek(offset)
-                content = csdfile.read(length)
+        cursor = self.conn.execute("SELECT sha, chunkstore_index, offset, length FROM chunks")
+        # chunks = cursor.fetchall()
 
-            # Save the file to the output folder
-            output_path = path.join(output_folder, sha_hex)
-            with open(output_path, "wb") as output_file:
-                output_file.write(content)
+        # Determine the number of threads to use
+        if threads is None:
+            threads = max(1, os.cpu_count() - 1)  # Use all but one CPU core
+        else:
+            threads = max(1, min(threads, os.cpu_count()))  # Clamp threads between 1 and CPU count
 
-            print(f"Unpacked file: {output_path}")
+        # Use ThreadPoolExecutor to process chunks in parallel
+        try:
+            with ThreadPoolExecutor(max_workers=threads) as executor:
+                futures = [
+                    executor.submit(self.unpack_chunks, sha_hex, chunkstore_index, offset, length, output_folder)
+                    for sha_hex, chunkstore_index, offset, length in cursor.fetchall()
+                ]
+                for future in as_completed(futures):
+                    future.result()  # Raise exceptions if any occurred during processing
+        except Exception as e:
+            raise Exception(f"Error unpacking chunks: {e}")
 
-    def pack(self, input_files):
-        """Packages the specified list of files into the chunkstore.
+    ### Responsible for writing a chunk to the chunkstore.
+    ### Checks if the file already exists within the SQL Database, skipping if true.
+    ### Then it checks if the current CSD will go over the max_file_size, and if so, creates a new file.
+    ### It then writes the chunk to the current CSD and inserts metadata into the SQLite database.
+    def write_chunk(self, sha, content):
+        """Writes a chunk to the appropriate CSD/CSM pair, skipping duplicates.
 
         Args:
-            input_files (list): List of file paths to be added. File names must be SHA1s.
+            sha (bytes): The SHA1 hash of the file.
+            content (bytes): The file content to write.
 
-        Raises:
-            Exception: If any file in the list does not exist or has an invalid name.
+        Returns:
+            bool: True if the file was added, False if it was skipped.
         """
-        for file_path in input_files:
-            if not path.isfile(file_path):
-                raise Exception(f"File {file_path} does not exist or is not a valid file")
+        if self.file_exists(sha):
+            # Skip the file if it already exists
+            return False
 
-            sha = path.basename(file_path)  # Use the file name as the SHA
-            if len(sha) != 40 or not all(c in "0123456789abcdef" for c in sha.lower()):
-                raise Exception(f"Invalid SHA1 file name: {file_path}")
+        # Write a chunk to the appropriate CSD/CSM pair
+        if not self.current_csd or self.current_file_size + len(content) > self.max_file_size:
+            self._create_new_file()
 
-            with open(file_path, "rb") as file:
-                content = file.read()
-                self.write_chunk(unhexlify(sha), content)
-                print(f"Packed file: {file_path}")
+        with open(self.current_csd, "ab") as csdfile:
+            offset = csdfile.tell()
+            csdfile.write(content)
+            length = len(content)
+            self.current_file_size += length
 
+        # Insert metadata into SQLite
+        self.conn.execute("""
+            INSERT OR REPLACE INTO chunks (sha, chunkstore_index, offset, length)
+            VALUES (?, ?, ?, ?)
+        """, (hexlify(sha).decode(), self.current_file_index, offset, length))
+        self.conn.commit()
+
+        return True
+
+    ### Writes metadata to the CSM files for all or a specific chunkstore.
+    ### This method is called when the chunkstore is closed or when a new chunkstore file is created.
+    ### It writes the metadata for each chunk in the chunkstore to the corresponding CSM file.
+    def write_csm(self, index=None):
+        """Writes metadata to the CSM files for all or a specific chunkstore."""
+        if index is None:  # Write all CSM files
+            for idx, (csd_path, csm_path) in enumerate(self.files, start=1):
+                self._write_csm_metadata(idx, csm_path)
+        else:  # Write a specific CSM file
+            _, csm_path = self.files[index - 1]
+            self._write_csm_metadata(index, csm_path)
+
+    ### Closes the SQLite connection and any thread-local connections.
+    ### This method is called when the Chunkstore instance is no longer needed.
     def close(self):
         """Closes the SQLite connection and any thread-local connections."""
         # Close the main connection
@@ -426,17 +517,17 @@ class Chunkstore():
             self.conn = None
             print("Main SQLite connection closed.")
 
-        # Close thread-local connections
-        if hasattr(self._thread_local, "conn"):
-            self._thread_local.conn.close()
-            self._thread_local.conn = None
-            print("Thread-local SQLite connection closed.")
-            
-        with self._file_handles_lock:
-            for file_handle in self._file_handles.values():
-                file_handle.close()
-            self._file_handles.clear()
+        # Close all thread-local connections
+        with self._thread_local_lock:
+            for thread_id, conn in self._thread_local_registry.items():
+                conn.close()
+                print(f"Thread-local SQLite connection for thread {thread_id} closed.")
+            self._thread_local_registry.clear()
 
+    ### Exports the SQLite database records to a CSV file for debugging purposes.
+    ### This method is called to generate a CSV file containing the chunk metadata:
+    ### SHA1, chunkstore index, offset, and length.
+    ### The CSV file can be used for debugging or analysis of the chunkstore contents.
     def debug_export_csv(self, output_csv_path):
         """Exports the SQLite database records to a CSV file for debugging purposes.
 
@@ -462,7 +553,6 @@ class Chunkstore():
         Args:
             chunk_list (list, optional): List of SHA1 hashes (in hexadecimal) of chunks to validate.
                                          If None, validates all chunks in the chunkstore.
-            depot_key (bytes, optional): Key used to decrypt encrypted chunks.
             threads (int, optional): Maximum number of threads to use for parallel processing.
 
         Returns:
@@ -489,9 +579,11 @@ class Chunkstore():
                 for future in as_completed(future_to_sha):
                     sha_hex, result = future.result()
                     validation_results[sha_hex] = result
-
+        
         return validation_results
 
+    ### Functionally identical to process_chunks, but returns the sha name and a true/false value instead of the content.
+    ### This method is called by the validate_chunks method to check the integrity of a single chunk.
     def _validate_single_chunk(self, sha_hex, chunkstore_index, offset, length, depot_key):
         """Validates a single chunk.
 
@@ -504,8 +596,7 @@ class Chunkstore():
         """
         try:
             csd_path, _ = self.files[chunkstore_index - 1]
-            csdfile = self._get_file_handle(csd_path)  # Reuse the file handle
-            with threading.Lock():  # Ensure thread-safe seek and read
+            with open(csd_path, "rb") as csdfile:
                 csdfile.seek(offset)
                 content = csdfile.read(length)
 
@@ -554,14 +645,6 @@ class Chunkstore():
             if hasattr(self._thread_local, "conn"):
                 self._thread_local.conn.close()
                 del self._thread_local.conn
-
-    def get_chunks_metadata(self, sha_list):
-        """Fetches metadata for multiple chunks in a single query."""
-        conn = self._get_thread_local_connection()
-        placeholders = ",".join("?" for _ in sha_list)
-        query = f"SELECT sha, chunkstore_index, offset, length FROM chunks WHERE sha IN ({placeholders})"
-        cursor = conn.execute(query, sha_list)
-        return {row[0]: row[1:] for row in cursor.fetchall()}
 
 if __name__ == "__main__":
     if len(argv) > 1:

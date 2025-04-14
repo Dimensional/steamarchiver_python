@@ -6,6 +6,7 @@ from os.path import exists
 from steam.core.manifest import DepotManifest
 from sys import stderr
 from migration import migration_needed, migrate
+from os.path import join
 
 if __name__ == "__main__":
     if migration_needed(): migrate()
@@ -16,7 +17,7 @@ if __name__ == "__main__":
     parser.add_argument("-q", action="store_true", help="quiet: only output errors and names of added or modified files", dest="quiet")
     parser.add_argument("-d", action="store_true", help="detailed: print the sha1 checksums of added/removed chunks", dest="detailed")
     args = parser.parse_args()
-    keyfile = "./keys/%s.depotkey" % args.depotid
+    keyfile = "./depot/%s/%s.depotkey" % (args.depotid, args.depotid)
     oldpath = f"./depot/{args.depotid}/manifest/{args.old}.manif5"
     newpath = f"./depot/{args.depotid}/manifest/{args.new}.manif5"
     if not exists(oldpath):

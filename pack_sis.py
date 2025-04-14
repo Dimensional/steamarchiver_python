@@ -2,108 +2,13 @@
 from argparse import ArgumentParser
 from binascii import hexlify, unhexlify
 from os import scandir, makedirs, remove
-from os.path import exists
+from os.path import exists, join, isfile
 from struct import pack, unpack, iter_unpack
 from vdf import dumps
 from sys import stderr
 from chunkstore import Chunkstore
 from steam.core.manifest import DepotManifest
-from migration import migration_needed, migrate
-
-def pack_backup(depot, destdir, decrypted=False, no_update=False, split=False, manifest_chunks=None, only_manifest=False):
-    target_base = destdir + "/" + str(depot) + "_depotcache_"
-    depot_dir = "./depot/" + str(depot)
-    max_file_size = 1 * 1024 * 1024 * 1024  # 1 GiB
-    file_index = 1
-    csd_target = target_base + str(file_index) + ".csd"
-    csm_target = target_base + str(file_index) + ".csm"
-    mode = "wb"
-
-    chunkstore = None
-    if exists(csm_target) and exists(csd_target):
-        if no_update: # don't want to update the old files, delete them
-            remove(csd_target)
-            remove(csm_target)
-            mode = "wb"
-        else:
-            chunkstore = Chunkstore(csd_target, depot, not decrypted)
-            chunkstore.unpack()
-            mode = "ab"
-            # Scan all existing .csm files
-            while exists(csm_target):
-                file_index += 1
-                csm_target = target_base + str(file_index) + ".csm"
-                csd_target = target_base + str(file_index) + ".csd"
-            # Reset file_index to the last valid index
-            file_index -= 1
-            csd_target = target_base + str(file_index) + ".csd"
-            csm_target = target_base + str(file_index) + ".csm"
-    if chunkstore is None:
-        chunkstore = Chunkstore(csd_target, depot, not decrypted)
-
-    if decrypted:
-        chunk_match = lambda chunk: chunk.endswith("_decrypted")
-    else:
-        chunk_match = lambda chunk: not chunk.endswith("_decrypted")
-
-    def is_hex(s):
-        try:
-            unhexlify(s)
-            return True
-        except:
-            return False
-
-    chunks = set()
-    if manifest_chunks:
-        chunks.update(manifest_chunks)
-
-    if not only_manifest:
-        cdn_chunks = [chunk.name for chunk in scandir(depot_dir + "/chunk/") if chunk.is_file()
-                      and not chunk.name.endswith(".manif5")
-                      and chunk_match(chunk.name)
-                      and is_hex(chunk.name.replace("_decrypted", ""))
-                      and not unhexlify(chunk.name.replace("_decrypted", "")) in chunkstore.chunks.keys()]
-        chunks.update(cdn_chunks)
-    
-    chunks = sorted(chunks)
-
-    csd = open(csd_target, mode)
-    chunks_added = 0
-    sizes = []
-    for chunk in chunks:
-        csd.seek(0, 2)
-        offset = csd.tell()
-
-        with open("./depot/" + str(depot) + "/chunk/" + chunk, "rb") as chunkfile:
-            chunkfile.seek(0, 2)
-            length = chunkfile.tell()
-            chunkfile.seek(0)
-
-            if split and offset + length > max_file_size:
-                sizes.append(csd.tell())
-                csd.close()
-                chunkstore.write_csm()
-                file_index += 1
-                csd_target = target_base + str(file_index) + ".csd"
-                csm_target = target_base + str(file_index) + ".csm"
-                csd = open(csd_target, "wb")
-                chunkstore = Chunkstore(csd_target, depot, not decrypted)
-                offset = 0
-
-            csd.write(chunkfile.read())
-
-        if decrypted:
-            chunkstore.chunks[unhexlify(chunk.replace("_decrypted", ""))] = (offset, length)
-        else:
-            chunkstore.chunks[unhexlify(chunk)] = (offset, length)
-        chunks_added += 1
-        print(f"depot {depot}: added chunk {chunk} ({chunks_added}/{len(chunks)})")
-    sizes.append(csd.tell())
-    csd.close()
-    chunkstore.write_csm()
-    print("writing index...")
-    print("packed", len(chunks), "chunk" if len(chunks) == 1 else "chunks")
-    return sizes
+from migration import migration_needed, migrate        
 
 if __name__ == "__main__":
     if migration_needed(): migrate()
@@ -113,7 +18,6 @@ if __name__ == "__main__":
     parser.add_argument("-n", dest="name", default="steamarchiver backup", type=str, help="Backup name")
     parser.add_argument("--decrypted", action='store_true', help="Use decrypted chunks to pack backup", dest="decrypted")
     parser.add_argument("--no-update", action='store_true', help="If an existing backup is found, DELETE it instead of updating it", dest="no_update")
-    parser.add_argument("--split", action='store_true', help="Enable 1 GiB file splitting", dest="split")
     parser.add_argument("--only-manifest", action='store_true', help="Only grab files listed in the manifest", dest="only_manifest")
     parser.add_argument("--destdir", help="Directory to put sis/csm/csd files in", default=".")
     args = parser.parse_args()
@@ -140,34 +44,95 @@ if __name__ == "__main__":
                 "chunkstores":{}
               }
         }
+        
+    missing_chunks = None
     for depot_tuple in args.depots:
+        chunks = None
+        depot = None
+        manifest = None
+        chunkfolder = None
+        if not exists(args.destdir) and args.destdir is not None:
+            makedirs(args.destdir, exist_ok=True)
+    
+        if args.no_update:
+            if exists(args.destdir):
+                print("removing existing backup", args.destdir, file=stderr)
+                for f in scandir(args.destdir):
+                    if f.is_file():
+                        remove(f.path)
+        
         if len(depot_tuple) == 2:
             depot, manifest = depot_tuple
-            manifest_chunks = set()
+            chunkfolder = join("depot", str(depot), "chunk")
+            chunks = []
             if (args.only_manifest):
-                with open(manifest, "rb") as f:
-                    manifest_data_source = f.read()
-                    manifest_data = DepotManifest.deserialize(manifest_data_source)
+                missing_chunks = []
+                depot_key_path = join("depot", str(depot), str(depot) + ".depotkey")
+                with open(depot_key_path, "rb") as key_file:
+                    depot_key = key_file.read()
+                with open(join("depot", str(depot), "manifest", str(manifest) + ".manif5"), "rb") as f:
+                    manifest_data = DepotManifest(f.read())
                     if manifest_data.filenames_encrypted:
-                        manifest_data.decrypt_filenames(args.depotkey)
+                        manifest_data.decrypt_filenames(depot_key)
                     for files in manifest_data.iter_files():
-                        for chunk in sorted(files.chunks, key=lambda chunk: chunk.offset):
-                            manifest_chunks.add(hexlify(chunk.sha).decode())
+                        if args.decrypted:
+                            # If the chunk is decrypted, we need to use the decrypted version
+                            for chunk in sorted(files.chunks, key=lambda chunk: chunk.offset):
+                                chunks.append(join(chunkfolder, hexlify(chunk.sha).decode() + "_decrypted"))
+                        else:
+                            # If the chunk is encrypted, we need to use the encrypted version
+                            for chunk in sorted(files.chunks, key=lambda chunk: chunk.offset):
+                                chunks.append(join(chunkfolder, hexlify(chunk.sha).decode()))
+                    # Verify that all chunks for the manifest are in the designated input folder
+                    for chunk in chunks:
+                        if not exists(join(chunk)):
+                            print(f"Missing chunk: {chunk} in {chunkfolder}", file=stderr)
+                            missing_chunks.append(chunk)
+                    
+                    if len(missing_chunks) > 0:        
+                        print("The following chunks are missing:")
+                        for chunk in missing_chunks:
+                            print(chunk)
+                        exit(1)
+                    
+            write_sku = True
         else:
             depot = depot_tuple[0]
-            manifest_chunks = None
+            chunkfolder = join("depot", str(depot), "chunk")
+            chunks = [
+                    join(chunkfolder, f.name) for f in scandir(chunkfolder) if f.is_file()
+                ]
+            if args.decrypted:
+                chunks = [chunk for chunk in chunks if chunk.endswith("_decrypted")]
+            else:
+                chunks = [chunk for chunk in chunks if not chunk.endswith("_decrypted")]
+        
+        chunks = sorted(set(chunks))
+        chunks = sorted(chunks, key=lambda chunk: chunk.lower())
         if write_sku:
-            if manifest_chunks is None:
+            if manifest is None:
                 write_sku = False
                 print("not generating sku.sis: no manifest specified for depot", depot)
             else:
                 sku["sku"]["depots"][len(sku["sku"]["depots"])] = str(depot)
                 sku["sku"]["manifests"][str(depot)] = str(manifest)
-        sizes = pack_backup(depot, args.destdir, args.decrypted, args.no_update, args.split, manifest_chunks, args.only_manifest)
+        try:
+            chunkstore = Chunkstore(args.destdir, depot, is_encrypted=not args.decrypted)    
+            chunkstore.pack(chunks)
+        
+            sizes = chunkstore.get_chunkstore_file_info()
+        except KeyboardInterrupt:
+            print("aborted by user", file=stderr)
+            chunkstore.close()
+            exit(1)
+        finally:
+            chunkstore.close()
         if write_sku:
-            sku["sku"]["chunkstores"][str(depot)] = {str(i+1): str(size) for i, size in enumerate(sizes)}
+            sku["sku"]["chunkstores"][str(depot)] = {
+                str(index): str(file_size) for index, file_size in enumerate(sizes)
+            }
 
     if write_sku:
         with open(args.destdir + "/sku.sis", "w") as skufile:
-            skufile.write(dumps(sku, pretty=True))
+            skufile.write(dumps(sku, pretty=True, acf=True))
             print("wrote sku.sis")
