@@ -110,6 +110,20 @@ class Chunkstore():
     ### The metadata is then inserted into the SQLite database.
     def _load_existing_files_to_connection(self, conn):
         """Loads existing CSD/CSM pairs for the depot and rebuilds the SQLite database."""
+        if self.depot is None:
+            depot_ids = set()
+            for filename in os.listdir(self.folder):
+                if filename.endswith(".csm") or filename.endswith(".csd"):
+                    depot_id = int(filename.split("_")[0])
+                    depot_ids.add(depot_id)
+
+            if len(depot_ids) == 1:
+                self.depot = depot_ids.pop()
+            else:
+                raise Exception(
+                    f"Multiple depots found in folder {self.folder}: {depot_ids}. "
+                    "Please specify the depot ID explicitly."
+                )
         for filename in sorted(
             (f for f in os.listdir(self.folder) if f.startswith(f"{self.depot}_") and f.endswith(".csm")),
             key=lambda x: int(x.split("_")[-1].split(".")[0])  # Extract numeric part for sorting
@@ -144,9 +158,7 @@ class Chunkstore():
 
             # Read the chunk count
             depot_id, chunk_count = unpack("<L L", csmfile.read(8))
-            if self.depot is None:
-                self.depot = depot_id
-            elif self.depot != depot_id:
+            if self.depot != depot_id:
                 raise Exception(f"Depot ID mismatch in file {csm_path}. "
                                 f"Expected {self.depot}, found {depot_id}.")
 

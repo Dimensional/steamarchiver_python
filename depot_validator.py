@@ -192,6 +192,8 @@ if __name__ == "__main__":
         
         if not badfiles.empty():
             print("Bad File:")
+        else:
+            print("No bad files found")
         while not badfiles.empty():
             bad = badfiles.get()
             print(bad)
