@@ -118,18 +118,19 @@ if __name__ == "__main__":
                 sku["sku"]["manifests"][str(depot)] = str(manifest)
         try:
             chunkstore = Chunkstore(args.destdir, depot, is_encrypted=not args.decrypted)    
-            chunkstore.pack(chunks)
-        
-            sizes = chunkstore.get_chunkstore_file_info()
+            chunkstore.pack(chunks)     
         except KeyboardInterrupt:
             print("aborted by user", file=stderr)
+            chunkstore.write_csm()
             chunkstore.close()
             exit(1)
         finally:
+            chunkstore.write_csm()
+            sizes = chunkstore.get_chunkstore_file_info()
             chunkstore.close()
         if write_sku:
             sku["sku"]["chunkstores"][str(depot)] = {
-                str(index): str(file_size) for index, file_size in enumerate(sizes)
+                str(index): str(file_size) for index, file_size in sizes.items()
             }
 
     if write_sku:

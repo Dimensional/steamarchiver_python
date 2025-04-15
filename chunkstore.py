@@ -12,6 +12,7 @@ import lzma
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import json
 
 _LOG = logging.getLogger("Chunkstore")
 
@@ -143,6 +144,11 @@ class Chunkstore():
 
             # Read the chunk count
             depot_id, chunk_count = unpack("<L L", csmfile.read(8))
+            if self.depot is None:
+                self.depot = depot_id
+            elif self.depot != depot_id:
+                raise Exception(f"Depot ID mismatch in file {csm_path}. "
+                                f"Expected {self.depot}, found {depot_id}.")
 
             # Read each chunk's metadata
             for chunk_index in range(chunk_count): 
@@ -303,9 +309,9 @@ class Chunkstore():
     ## This method is called to get the file information for all chunkstore files.
     def get_chunkstore_file_info(self):
         file_info = {}
-        for index, (csd_path, _) in enumerate(self.files, start=1):
+        for chunkstore_index, (csd_path, _) in enumerate(self.files, start=1):
             file_size = path.getsize(csd_path)
-            file_info[index] = file_size
+            file_info[chunkstore_index] = file_size
         return file_info
 
     ## Used to package every loose chunk into the chunkstore for the depot.
@@ -386,38 +392,6 @@ class Chunkstore():
             _LOG.error(f"Error processing chunk {sha_hex}: {e}")
             raise ValueError(f"Error processing chunk {sha_hex}: {e}")
 
-    ### Unpacks a single chunk to the specified output folder.
-    ### This method is called by the unpack method to process each chunk in parallel.
-    def unpack_chunks(self, sha_hex, chunkstore_index, offset, length, output_folder):
-        """Processes and unpacks a single chunk to the specified output folder.
-
-        Args:
-            sha_hex (str): The SHA1 hash of the chunk.
-            chunkstore_index (int): The index of the chunkstore file.
-            offset (int): The offset of the chunk in the file.
-            length (int): The length of the chunk.
-            output_folder (str): Path to the folder where the chunk will be saved.
-
-        Raises:
-            Exception: If there is an error unpacking the chunk.
-        """
-        if not self.is_encrypted:
-            sha_hex += "_decrypted"  # Append "_decrypted" if not encrypted
-        csd_path, _ = self.files[chunkstore_index - 1]
-        
-        output_path = path.join(output_folder, sha_hex)
-        if path.exists(output_path):
-            return
-        
-        with open(csd_path, "rb") as csdfile:
-            csdfile.seek(offset)
-            content = csdfile.read(length)
-
-        # Save the chunk to the output folder
-        with open(output_path, "wb") as output_file:
-            output_file.write(content)
-        print(f"Unpacked file: {output_path}")
-
     ### Unpacks all files from the chunkstore into the specified output folder using multithreading.
     ### This method is called to process each chunk in parallel using ThreadPoolExecutor.
     def unpack(self, output_folder, threads=None):
@@ -457,6 +431,38 @@ class Chunkstore():
                     future.result()  # Raise exceptions if any occurred during processing
         except Exception as e:
             raise Exception(f"Error unpacking chunks: {e}")
+
+    ### Unpacks a single chunk to the specified output folder.
+    ### This method is called by the unpack method to process each chunk in parallel.
+    def unpack_chunks(self, sha_hex, chunkstore_index, offset, length, output_folder):
+        """Processes and unpacks a single chunk to the specified output folder.
+
+        Args:
+            sha_hex (str): The SHA1 hash of the chunk.
+            chunkstore_index (int): The index of the chunkstore file.
+            offset (int): The offset of the chunk in the file.
+            length (int): The length of the chunk.
+            output_folder (str): Path to the folder where the chunk will be saved.
+
+        Raises:
+            Exception: If there is an error unpacking the chunk.
+        """
+        if not self.is_encrypted:
+            sha_hex += "_decrypted"  # Append "_decrypted" if not encrypted
+        csd_path, _ = self.files[chunkstore_index - 1]
+        
+        output_path = path.join(output_folder, sha_hex)
+        if path.exists(output_path):
+            return
+        
+        with open(csd_path, "rb") as csdfile:
+            csdfile.seek(offset)
+            content = csdfile.read(length)
+
+        # Save the chunk to the output folder
+        with open(output_path, "wb") as output_file:
+            output_file.write(content)
+        print(f"Unpacked file: {output_path}")
 
     ### Responsible for writing a chunk to the chunkstore.
     ### Checks if the file already exists within the SQL Database, skipping if true.
@@ -547,6 +553,37 @@ class Chunkstore():
         except Exception as e:
             raise Exception(f"Failed to export debug CSV: {e}")
 
+    ### Converts the CSM metadata to JSON format for easier readability and analysis.
+    ### This method is called to generate a JSON representation of the chunkstore metadata.
+    def csm_to_json(self):
+        """Converts the CSM metadata to JSON format.
+
+        Returns:
+            str: JSON string representation of the CSM metadata.
+        """
+        cursor = self.conn.execute("SELECT sha, chunkstore_index, offset, length FROM chunks ORDER BY sha")
+        csm_data = {
+            "depot": self.depot,
+            "is_encrypted": self.is_encrypted,
+            "chunks": [
+                {
+                    "sha": sha,
+                    "chunkstore_index": chunkstore_index,
+                    "offset": offset,
+                    "length": length
+                }
+                for sha, chunkstore_index, offset, length in cursor.fetchall()
+            ]
+        }
+        # for sha, chunkstore_index, offset, length in cursor.fetchall():
+        #     csm_data["chunks"].append({
+        #     "sha": sha,
+        #     "chunkstore_index": chunkstore_index,
+        #     "offset": offset,
+        #     "length": length
+        #     })
+        return csm_data
+    
     def validate_chunks(self, chunk_list=None, threads=None):
         """Validates the integrity of chunks in the chunkstore.
 
