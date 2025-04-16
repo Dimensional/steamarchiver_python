@@ -3,7 +3,6 @@ from argparse import ArgumentParser
 from binascii import hexlify, unhexlify
 from os import scandir, makedirs, remove
 from os.path import exists, join, isfile
-from struct import pack, unpack, iter_unpack
 from vdf import dumps
 from sys import stderr
 from chunkstore import Chunkstore
@@ -19,8 +18,21 @@ if __name__ == "__main__":
     parser.add_argument("--decrypted", action='store_true', help="Use decrypted chunks to pack backup", dest="decrypted")
     parser.add_argument("--no-update", action='store_true', help="If an existing backup is found, DELETE it instead of updating it", dest="no_update")
     parser.add_argument("--only-manifest", action='store_true', help="Only grab files listed in the manifest", dest="only_manifest")
+    parser.add_argument("--compare-manifests", type=int, help="Compare two manifests and only store files found in the new manifest", dest="compare_manifests", default=None)
+    parser.add_argument("--repackage", action='store_true', help="Repackage an existing chunkstore with sorted files", dest="repackage")
     parser.add_argument("--destdir", help="Directory to put sis/csm/csd files in", default=".")
     args = parser.parse_args()
+    
+    if len(args.depots) == 2 and args.only_manifest:
+        if args.compare_manifests:
+            print("must specify at least 2 manifests to make a diff chunkstore", file=stderr)
+            parser.print_usage()
+            exit(1)
+        else:
+            print("must specify at least 1 manifest to make a chunkstore", file=stderr)
+            parser.print_usage()
+            exit(1)
+    
     makedirs(args.destdir, exist_ok=True)
     if args.depots == None:
         print("must specify at least one depot", file=stderr)
@@ -63,14 +75,20 @@ if __name__ == "__main__":
         
         if len(depot_tuple) == 2:
             depot, manifest = depot_tuple
-            chunkfolder = join("depot", str(depot), "chunk")
+            depot_folder = join("depot", str(depot))
+            chunkfolder = join(depot_folder, "chunk")
             chunks = []
+            missing_chunks = []
             if (args.only_manifest):
-                missing_chunks = []
+                current_chunks = []
                 depot_key_path = join("depot", str(depot), str(depot) + ".depotkey")
                 with open(depot_key_path, "rb") as key_file:
                     depot_key = key_file.read()
-                with open(join("depot", str(depot), "manifest", str(manifest) + ".manif5"), "rb") as f:
+                manifest_file = join(depot_folder, "manifest", str(manifest) + ".manif5")
+                if not exists(manifest_file):   
+                    print("Manifest file does not exist:", manifest_file, file=stderr)
+                    exit(1)
+                with open(manifest_file, "rb") as f:
                     manifest_data = DepotManifest(f.read())
                     if manifest_data.filenames_encrypted:
                         manifest_data.decrypt_filenames(depot_key)
@@ -78,23 +96,56 @@ if __name__ == "__main__":
                         if args.decrypted:
                             # If the chunk is decrypted, we need to use the decrypted version
                             for chunk in sorted(files.chunks, key=lambda chunk: chunk.offset):
-                                chunks.append(join(chunkfolder, hexlify(chunk.sha).decode() + "_decrypted"))
+                                current_chunks.append(hexlify(chunk.sha).decode() + "_decrypted")
                         else:
                             # If the chunk is encrypted, we need to use the encrypted version
                             for chunk in sorted(files.chunks, key=lambda chunk: chunk.offset):
-                                chunks.append(join(chunkfolder, hexlify(chunk.sha).decode()))
-                    # Verify that all chunks for the manifest are in the designated input folder
-                    for chunk in chunks:
-                        if not exists(join(chunk)):
-                            print(f"Missing chunk: {chunk} in {chunkfolder}", file=stderr)
-                            missing_chunks.append(chunk)
-                    
-                    if len(missing_chunks) > 0:        
-                        print("The following chunks are missing:")
-                        for chunk in missing_chunks:
-                            print(chunk)
+                                current_chunks.append(hexlify(chunk.sha).decode())
+                
+                if (args.compare_manifests):
+                    new_chunks = []
+                    new_manifest_file = join(depot_folder, "manifest", str(args.compare_manifests) + ".manif5")
+                    if not exists(new_manifest_file):   
+                        print("Manifest file does not exist:", new_manifest_file, file=stderr)
                         exit(1)
-                    
+                    with open(new_manifest_file, "rb") as f:
+                        compare_manifest_data = DepotManifest(f.read())
+                        if compare_manifest_data.filenames_encrypted:
+                            compare_manifest_data.decrypt_filenames(depot_key)
+                    for files in compare_manifest_data.iter_files():
+                        if args.decrypted:
+                            # If the chunk is decrypted, we need to use the decrypted version
+                            for chunk in sorted(files.chunks, key=lambda chunk: chunk.offset):
+                                new_chunks.append(hexlify(chunk.sha).decode() + "_decrypted")
+                        else:
+                            # If the chunk is encrypted, we need to use the encrypted version
+                            for chunk in sorted(files.chunks, key=lambda chunk: chunk.offset):
+                                new_chunks.append(hexlify(chunk.sha).decode())
+                
+                    # Remove chunks that are already in the original manifest
+                    chunks = [chunk for chunk in new_chunks if chunk not in current_chunks]
+                # Prepend chunkfolder to each chunk name
+                # current_chunks = [join(chunkfolder, chunk) for chunk in current_chunks]
+                # new_chunks = [join(chunkfolder, chunk) for chunk in new_chunks]
+                chunks = [join(chunkfolder, chunk) for chunk in chunks]
+                
+                # If there are no new chunks, exit
+                # Unlikely, but have to have a check for it
+                if len(chunks) == 0:
+                    print("No new chunks found in the new manifest", file=stderr)
+                    exit(1)
+
+                # Verify that all chunks for the manifest are in the designated input folder
+                for chunk in chunks:
+                    if not exists(chunk):
+                        print(f"Missing chunk: {chunk} in {chunkfolder}", file=stderr)
+                        missing_chunks.append(chunk)
+                if len(missing_chunks) > 0:        
+                    print("The following chunks are missing:")
+                    for chunk in missing_chunks:
+                        print(chunk)
+                    exit(1)
+
             write_sku = True
         else:
             depot = depot_tuple[0]
@@ -115,7 +166,7 @@ if __name__ == "__main__":
                 print("not generating sku.sis: no manifest specified for depot", depot)
             else:
                 sku["sku"]["depots"][len(sku["sku"]["depots"])] = str(depot)
-                sku["sku"]["manifests"][str(depot)] = str(manifest)
+                sku["sku"]["manifests"][str(depot)] = str(manifest) if args.compare_manifests is None else str(args.compare_manifests)
         try:
             chunkstore = Chunkstore(args.destdir, depot, is_encrypted=not args.decrypted)    
             chunkstore.pack(chunks)     

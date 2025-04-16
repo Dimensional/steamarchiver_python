@@ -15,6 +15,7 @@ if __name__ == "__main__":
     parser.add_argument("target", type=str, help="Path chunkstore to unpack.")
     parser.add_argument("-d", "--depot", type=int, help="Depot ID of the chunkstore.", default=None)
     parser.add_argument("-o", "--output", type=str, help="Output directory for unpacked chunks.", default="chunkstore")
+    parser.add_argument("-t", "--threads", type=int, default=None, help="Number of threads to use for unpacking.")
     args = parser.parse_args()
     
     try:
@@ -26,10 +27,13 @@ if __name__ == "__main__":
             print(f"Creating output directory: {output_folder}")
             makedirs(output_folder, exist_ok=True)
     
-        chunkstore.unpack(output_folder)
+        chunkstore.unpack(output_folder, threads=args.threads)
         print("Unpacking completed successfully.")
     except Exception as e:
         chunkstore.close()
         print(f"Error unpacking chunkstore: {e}")
+    except KeyboardInterrupt:
+        print("Unpacking interrupted by user.")
+        chunkstore.close()
     finally:
         chunkstore.close()
