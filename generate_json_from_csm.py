@@ -1,6 +1,5 @@
 import os
 import json
-from struct import iter_unpack
 from chunkstore import Chunkstore
 
 # class CSMReader:

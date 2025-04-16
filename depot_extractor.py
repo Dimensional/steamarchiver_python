@@ -27,12 +27,10 @@ from io import BytesIO
 from os import makedirs, remove
 from os.path import dirname, exists, join
 from pathlib import Path
-from struct import unpack
 from sys import argv
 from zipfile import ZipFile
 import lzma
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import json
 import logging
 import time
 from queue import PriorityQueue
@@ -260,58 +258,7 @@ if __name__ == "__main__":
                             else:
                                 print(f"File {file.filename} is \033[91m\033[1minvalid\033[0m.")
                                 Path(final_file_path).rename(final_file_path + ".corrupt")
-                        # with ThreadPoolExecutor(max_workers=args.max_threads) as executor:
-                        #     futures = [
-                        #         executor.submit(
-                        #             lambda chunk: (
-                        #                 chunk.offset, 
-                        #                 chunkstore.get_chunk(hexlify(chunk.sha).decode(), process=True, depot_key=args.depotkey), 
-                        #                 hexlify(chunk.sha).decode() # Ensure chunk.sha is hex-encoded and decoded
-                        #                 ),
-                        #             chunk
-                        #         )
-                        #         for chunk in sorted(file.chunks, key=lambda chunk: chunk.offset)
-                        #         if hexlify(chunk.sha).decode() # Ensure filtering uses the hex-encoded string
-                        #     ]
-                        #     pq = PriorityQueue()
-                        #     for future in as_completed(futures):
-                        #         try:
-                        #             result = future.result()
-                        #             if result is not None:
-                        #                 pq.put(result)
-                        #         except Exception as e:
-                        #             _LOG.error(f"Error in thread: {e}")
-                        #             # Cancel all remaining threads
-                        #             for f in futures:
-                        #                 f.cancel()
-                        #             raise e  # Propagate the error to terminate the process
-                        # retries = 5
-                        # for attempt in range(retries):
-                        #     try:
-                        #         with open(incomplete_file_path, "r+b") as f:
-                        #             while not pq.empty():
-                        #                 offset, decompressed, chunkhex = pq.get()
-                        #                 f.seek(offset)
-                        #                 f.write(decompressed)
-                        #                 _LOG.info(f"Extracted {file.filename} from chunk {chunkhex}")
-                        #         # Rename the incomplete file based on processing results
-                        #         if pq.empty():
-                        #             Path(incomplete_file_path).rename(final_file_path)
-                        #             # Validate the SHA-1 checksum of the output file if requested
-                        #             if args.validate:
-                        #                 if validate_file(final_file_path, hexlify(file.sha_content).decode()):
-                        #                     print(f"File {file.filename} is \033[92m\033[1mvalid\033[0m.")
-                        #                 else:
-                        #                     print(f"File {file.filename} is \033[91m\033[1minvalid\033[0m.")
-                        #                     Path(final_file_path).rename(final_file_path + ".corrupt")
-                        #         break
-                        #     except PermissionError as e:
-                        #         if attempt < retries - 1:
-                        #             time.sleep(1)  # Wait for 1 second before retrying
-                        #         else:
-                        #             raise e
                 else:
-                    #path = f"./depot/{args.depotid}"
                     chunk_path = join("./depot", str(args.depotid), "chunk/")
                     print(f"Using chunk path: {chunk_path}")  # Debugging line to verify the chunk path
                     with ThreadPoolExecutor(max_workers=args.max_threads) as executor:  # Specify the number of threads here
@@ -363,8 +310,8 @@ if __name__ == "__main__":
             chunkstore.close()
         exit(1)
 
-    # if badfiles:
-    #     print("ERROR: the following chunks are missing or corrupt:")
-    #     for file in badfiles:
-    #         print(file)
-    #     exit(1)
+    if badfiles:
+        print("ERROR: the following chunks are missing or corrupt:")
+        for file in badfiles:
+            print(file)
+        exit(1)

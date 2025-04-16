@@ -12,7 +12,6 @@ import lzma
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
-import json
 
 _LOG = logging.getLogger("Chunkstore")
 

@@ -334,9 +334,6 @@ def try_load_manifest(appid, depotid, manifestid, branch='public', password=None
                 break
             except SteamError as e:
                 if e.eresult == EResult.AccessDenied:
-                    # if result is not None and result == EResult.RateLimitExceeded:
-                    #     print("Rate Limit Exceeded")
-                    #     return False
                     if not license_requested and retry < 2:
                         result, granted_appids, granted_packageids = steam_client.request_free_license([appid])
                         retry += 1
@@ -452,28 +449,6 @@ def get_depotkeys(app, depot):
                 print("\033[31mError writing key file:\033[0m", e)
             f.close()
         return
-    
-    # If the text file exists but not the binary
-    # grab it from the text file and write it to the binary
-    # if key_text and not key_binary:
-    #     with open(keyfile, "wb") as f:
-    #         try:
-    #             f.write(key)
-    #         except Exception as e:
-    #             print("\033[31mError writing to binary key file.\033[0m", e)
-    #     return
-    
-    # If the binary file exists but not the text
-    # grab it from the binary and write it to the text file
-    # if key_binary and not key_text:
-    #     with open(keyfile, "rb") as f:
-    #         key = f.read()
-    #     with open("./depot_keys.txt", "a", encoding="utf-8", newline="\n") as f:
-    #         if key != b'':
-    #             key_hex = hexlify(key).decode()
-    #             f.write("%s\t\t%s" % (depot, key_hex) + "\n")
-    #             print("%s\t\t%s" % (depot, key_hex))
-    #     return
 
 def detect_lancache():
     import socket

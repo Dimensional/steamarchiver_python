@@ -157,25 +157,6 @@ if __name__ == "__main__":
                     print(sha)
         finally:
             chunkstore.close()
-    # elif args.manifests:
-    #     manifestChunks = set()
-    #     manifestFiles = []
-    #     if len(args.manifests) == 1 and Path(args.manifests[0]).is_dir():
-    #         manifestFiles = [Path(args.manifests[0]) / data.name for data in scandir(args.manifests[0]) if data.is_file() and data.name.endswith(".zip")]
-    #     else:
-    #         manifestFiles = args.manifests
-
-    #     for eachManifest in manifestFiles:
-    #         with open(eachManifest, "rb") as f:
-    #             manifest_data = f.read()
-    #             manifest = DepotManifest.deserialize(manifest_data)
-    #             if manifest.filenames_encrypted:
-    #                 manifest.decrypt_filenames(args.depotkey)
-    #             for files in manifest.iter_files():
-    #                 for chunk in sorted(files.chunks, key=lambda chunk: chunk.offset):
-    #                     manifestChunks.add(chunk.sha)
-    #     for name in manifestChunks:
-    #         chunks[name] = 0
     else:       
         chunkFiles = [data.name for data in scandir(chunk_path) if data.is_file()
         and splitext(data.name)[1] == ""]
@@ -198,7 +179,6 @@ if __name__ == "__main__":
             bad = badfiles.get()
             print(bad)
     
-    # print(f"Found chunk files: {chunk_path}/{chunkFiles}")
     def is_hex(s):
         try:
             unhexlify(s)
