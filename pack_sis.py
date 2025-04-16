@@ -123,7 +123,10 @@ if __name__ == "__main__":
                                 new_chunks.append(hexlify(chunk.sha).decode())
                 
                     # Remove chunks that are already in the original manifest
+                if (args.compare_manifests):
                     chunks = [chunk for chunk in new_chunks if chunk not in current_chunks]
+                else:
+                    chunks = current_chunks
                 # Prepend chunkfolder to each chunk name
                 # current_chunks = [join(chunkfolder, chunk) for chunk in current_chunks]
                 # new_chunks = [join(chunkfolder, chunk) for chunk in new_chunks]
