@@ -163,7 +163,7 @@ class Chunkstore():
 
             # Read each chunk's metadata
             for chunk_index in range(chunk_count): 
-                sha = hexlify(csmfile.read(20)).decode()
+                sha = hexlify(csmfile.read(20)).decode().lower()
                 offset, _, length = unpack("<Q L L", csmfile.read(16)) 
                 # Insert the metadata into the SQLite database
                 conn.execute("""
@@ -405,7 +405,8 @@ class Chunkstore():
 
     ### Unpacks all files from the chunkstore into the specified output folder using multithreading.
     ### This method is called to process each chunk in parallel using ThreadPoolExecutor.
-    def unpack(self, output_folder, threads=None):
+    ### Can use a list of chunks to unpack specific files, or unpack all files if chunks is None.
+    def unpack(self, output_folder, chunks=None, threads=None):
         """Unpacks all files from the chunkstore into the specified output folder using multithreading.
 
         Args:
@@ -421,10 +422,32 @@ class Chunkstore():
             except Exception as e:
                 raise Exception(f"Failed to create output folder: {output_folder}") from e
 
-        # Query all chunks from the SQLite database
-        cursor = self.conn.execute("SELECT sha, chunkstore_index, offset, length FROM chunks")
-        # chunks = cursor.fetchall()
-
+        # Query chunks from the SQLite database
+        chunk_data = []
+        # If chunks is None, fetch all chunks from the database
+        if chunks is None:
+            cursor = self.conn.execute("SELECT sha, chunkstore_index, offset, length FROM chunks")
+            chunk_data = cursor.fetchall()
+        # If chunks is provided, fetch only those chunks from the database
+        else:
+            chunks = [sha.lower() for sha in chunks]  # Convert to lowercase if needed
+            batch_size = 500 # SQLite has a limit on the number of parameters in a query, max being 999
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i:i + batch_size]
+                cursor = self.conn.execute(
+                    "SELECT sha, chunkstore_index, offset, length FROM chunks WHERE sha IN ({})".format(
+                    ",".join("?" for _ in batch)
+                    ), 
+                    batch
+                )
+                batch_results = cursor.fetchall()
+                chunk_data.extend(batch_results)
+                
+            print(len(chunk_data))
+            missing_shas = [sha for sha in chunks if sha not in {row[0] for row in chunk_data}]
+            if missing_shas:
+                print(f"Missing SHAs: {missing_shas}")
+                print(f"Number of missing SHAs: {len(missing_shas)}")
         # Determine the number of threads to use
         if threads is None:
             threads = max(1, os.cpu_count() - 1)  # Use all but one CPU core
@@ -436,7 +459,7 @@ class Chunkstore():
             with ThreadPoolExecutor(max_workers=threads) as executor:
                 futures = [
                     executor.submit(self.unpack_chunks, sha_hex, chunkstore_index, offset, length, output_folder)
-                    for sha_hex, chunkstore_index, offset, length in cursor.fetchall()
+                    for sha_hex, chunkstore_index, offset, length in chunk_data
                 ]
                 for future in as_completed(futures):
                     future.result()  # Raise exceptions if any occurred during processing
@@ -507,7 +530,7 @@ class Chunkstore():
         self.conn.execute("""
             INSERT OR REPLACE INTO chunks (sha, chunkstore_index, offset, length)
             VALUES (?, ?, ?, ?)
-        """, (hexlify(sha).decode(), self.current_file_index, offset, length))
+        """, (hexlify(sha).decode().lower(), self.current_file_index, offset, length))
         self.conn.commit()
 
         return True

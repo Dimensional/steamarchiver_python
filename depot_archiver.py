@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from math import ceil
 from os import makedirs, path, listdir, remove
 from sys import argv
+import signal
 import logging
 import json
 import csv
@@ -181,6 +182,7 @@ def save_manifest_to_json(manifest, output_dir):
     
     print(f"Manifest saved to {manifest_path}")
 
+chunkstore = None
 def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override=None, backup=False):
     if not manifest:
         return False
@@ -192,7 +194,6 @@ def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override
         return True
     dest = "./depot/" + str(manifest.depot_id) + "/chunk/"
     makedirs(dest, exist_ok=True)
-    chunkstore = None
     if backup:
         chunkstore_folder = path.join("./depot", str(manifest.depot_id), "chunkstore")
         makedirs(chunkstore_folder, exist_ok=True)  # Ensure the chunkstore folder exists
@@ -619,3 +620,13 @@ if __name__ == "__main__":
                 exit_status += (0 if archive_manifest(try_load_manifest(appid, depot, get_gid(depotinfo["manifests"]["public"])), c, depotinfo["name"] if "name" in depotinfo else "unknown", args.dry_run, args.server, args.backup) else 1)
     #steam_client.logout()
     exit(exit_status)
+
+
+def cleanup(signal_received, frame):
+    if chunkstore:
+        chunkstore.write_csm()
+        chunkstore.close()
+    exit(1)
+
+signal.signal(signal.SIGINT, cleanup)
+signal.signal(signal.SIGTERM, cleanup)
