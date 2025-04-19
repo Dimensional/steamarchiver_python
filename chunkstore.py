@@ -747,10 +747,10 @@ class Chunkstore():
                 del self._thread_local.conn
 
 if __name__ == "__main__":
-    if len(argv) > 1:
+    if len(sys.argv) > 1:
         chunkstore = None
         try:
-            chunkstore = Chunkstore(argv[1])  # Initialize the Chunkstore
+            chunkstore = Chunkstore(sys.argv[1])  # Initialize the Chunkstore
             print(chunkstore)  # Perform operations (e.g., print its representation)
         except KeyboardInterrupt:
             print("Processing interrupted by user.")
