@@ -2,7 +2,8 @@
 from binascii import hexlify, unhexlify
 from os import path
 from struct import pack, unpack
-from sys import argv
+import sys
+import signal
 import os
 import sqlite3
 from steam.core.crypto import symmetric_decrypt
@@ -28,30 +29,38 @@ class Chunkstore():
         Raises:
             Exception: If the specified folder does not exist.
         """
-        self.folder = folder
-        self.depot_key = depot_key
-        self.depot = depot
-        self.is_encrypted = is_encrypted
-        self.max_file_size = max_file_size
-        self.files = []
-        self.current_csm = None
-        self.current_csd = None
-        self.current_file_index = 0
-        self.current_file_size = 0
+        try:
+            self.folder = folder
+            self.depot_key = depot_key
+            self.depot = depot
+            self.is_encrypted = is_encrypted
+            self.max_file_size = max_file_size
+            self.files = []
+            self.current_csm = None
+            self.current_csd = None
+            self.current_file_index = 0
+            self.current_file_size = 0
 
-        if not path.exists(self.folder):
-            raise Exception(f"Folder {self.folder} does not exist")
+            if not path.exists(self.folder):
+                raise Exception(f"Folder {self.folder} does not exist")
 
-        # Initialize in-memory SQLite database before loading existing files
-        self.conn = sqlite3.connect(":memory:")
-        self._init_database(self.conn)
+            # Initialize in-memory SQLite database before loading existing files
+            self.conn = sqlite3.connect(":memory:")
+            self._init_database(self.conn)
 
-        self._thread_local = threading.local()  # Thread-local storage for SQLite connections
-        self._thread_local_registry = {}  # Shared registry for all thread-local connections
-        self._thread_local_lock = threading.Lock()  # Lock for thread-local registry
+            self._thread_local = threading.local()  # Thread-local storage for SQLite connections
+            self._thread_local_registry = {}  # Shared registry for all thread-local connections
+            self._thread_local_lock = threading.Lock()  # Lock for thread-local registry
 
-        # Load existing files after the database is initialized
-        self._load_existing_files_to_connection(self.conn)
+            # Load existing files after the database is initialized
+            self._load_existing_files_to_connection(self.conn)
+        
+            # Register signal handlers
+            self._register_signal_handlers()
+        except Exception as e:
+            # Ensure cleanup if initialization fails
+            self.close()
+            raise e
 
     def __repr__(self):
         """Returns a string representation of the Chunkstore instance."""
@@ -563,6 +572,26 @@ class Chunkstore():
                 conn.close()
                 print(f"Thread-local SQLite connection for thread {thread_id} closed.")
             self._thread_local_registry.clear()
+
+    _signal_handlers_registered = False   # Class-level flag
+
+    def _register_signal_handlers(self):
+        """Register signal handlers for cleanup."""
+        if Chunkstore._signal_handlers_registered:
+            return  # Avoid multiple registrations
+        
+        """Register signal handlers for cleanup."""
+        def cleanup_and_exit(signal_received, frame):
+            print(f"Signal {signal_received} received. Cleaning up...")
+            self.close()
+            if signal_received == signal.SIGINT:
+                raise KeyboardInterrupt  # Let the script handle Ctrl+C
+            else:
+                sys.exit(0)  # Exit immediately for other signals
+        
+        signal.signal(signal.SIGINT, cleanup_and_exit)  # Handle Ctrl+C
+        signal.signal(signal.SIGTERM, cleanup_and_exit)  # Handle termination signals
+        Chunkstore._signal_handlers_registered = True
 
     ### Exports the SQLite database records to a CSV file for debugging purposes.
     ### This method is called to generate a CSV file containing the chunk metadata:
