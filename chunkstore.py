@@ -583,6 +583,7 @@ class Chunkstore():
         """Register signal handlers for cleanup."""
         def cleanup_and_exit(signal_received, frame):
             print(f"Signal {signal_received} received. Cleaning up...")
+            self.write_csm()  # Write CSM files before exiting
             self.close()
             if signal_received == signal.SIGINT:
                 raise KeyboardInterrupt  # Let the script handle Ctrl+C

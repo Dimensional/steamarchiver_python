@@ -290,6 +290,7 @@ def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override
         run(run_workers(download_state))
     except KeyboardInterrupt:
         print("\n\033[31mDownload interrupted by user.\033[0m")
+        exit(1)
     except Exception as e:
         print(f"\n\033[31mAn error occurred: {e}\033[0m")
     finally:
