@@ -67,11 +67,3 @@ if __name__ == "__main__":
         chunkstore.close()
     finally:
         chunkstore.close()
-        
-def cleanup(signal_received, frame):
-    if chunkstore:
-        chunkstore.close()
-    exit(1)
-
-signal.signal(signal.SIGINT, cleanup)
-signal.signal(signal.SIGTERM, cleanup)

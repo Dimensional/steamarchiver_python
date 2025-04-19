@@ -15,7 +15,6 @@ from os.path import dirname, exists, join, splitext
 from pathlib import Path
 from struct import unpack
 from sys import argv
-import signal
 from zipfile import BadZipFile, ZipFile
 import lzma
 import csv
@@ -186,11 +185,3 @@ if __name__ == "__main__":
             return True
         except:
             return False
-
-def cleanup(signal_received, frame):
-    if chunkstore:
-        chunkstore.close()
-    exit(1)
-
-signal.signal(signal.SIGINT, cleanup)
-signal.signal(signal.SIGTERM, cleanup)

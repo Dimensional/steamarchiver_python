@@ -5,7 +5,6 @@ from os import scandir, makedirs, remove
 from os.path import exists, join, isfile
 from vdf import dumps
 from sys import stderr, argv
-import signal
 from chunkstore import Chunkstore
 from steam.core.manifest import DepotManifest
 from migration import migration_needed, migrate        
@@ -196,12 +195,3 @@ if __name__ == "__main__":
         with open(args.destdir + "/sku.sis", "w") as skufile:
             skufile.write(dumps(sku, pretty=True, acf=True))
             print("wrote sku.sis")
-
-def cleanup(signal_received, frame):
-    if chunkstore:
-        chunkstore.write_csm()
-        chunkstore.close()
-    exit(1)
-
-signal.signal(signal.SIGINT, cleanup)
-signal.signal(signal.SIGTERM, cleanup)

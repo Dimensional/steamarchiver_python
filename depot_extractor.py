@@ -28,7 +28,6 @@ from os import makedirs, remove
 from os.path import dirname, exists, join
 from pathlib import Path
 from sys import argv
-import signal
 from zipfile import ZipFile
 import lzma
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -316,11 +315,3 @@ if __name__ == "__main__":
         for file in badfiles:
             print(file)
         exit(1)
-
-def cleanup(signal_received, frame):
-    if chunkstore:
-        chunkstore.close()
-    exit(1)
-
-signal.signal(signal.SIGINT, cleanup)
-signal.signal(signal.SIGTERM, cleanup)
