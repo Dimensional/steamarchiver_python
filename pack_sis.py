@@ -179,12 +179,12 @@ if __name__ == "__main__":
             chunkstore.pack(chunks)     
         except KeyboardInterrupt:
             print("aborted by user", file=stderr)
-            chunkstore.write_csm()
+            # chunkstore.write_csm(chunkstore.current_file_index)
             chunkstore.close()
             exit(1)
         finally:
-            chunkstore.write_csm()
             sizes = chunkstore.get_chunkstore_file_info()
+            chunkstore.write_csm(chunkstore.current_file_index)
             chunkstore.close()
         if write_sku:
             sku["sku"]["chunkstores"][str(depot)] = {
