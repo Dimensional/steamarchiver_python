@@ -19,7 +19,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-update", action='store_true', help="If an existing backup is found, DELETE it instead of updating it", dest="no_update")
     parser.add_argument("--only-manifest", action='store_true', help="Only grab files listed in the manifest", dest="only_manifest")
     parser.add_argument("--compare-manifests", type=int, help="Compare two manifests and only store files found in the new manifest", dest="compare_manifests", default=None)
-    parser.add_argument("--repackage", action='store_true', help="Repackage an existing chunkstore with sorted files", dest="repackage")
+    # parser.add_argument("--repackage", action='store_true', help="Repackage an existing chunkstore with sorted files", dest="repackage") # Currently unused, might move to separate script.
     parser.add_argument("--destdir", help="Directory to put sis/csm/csd files in", default=".")
     args = parser.parse_args()
     
