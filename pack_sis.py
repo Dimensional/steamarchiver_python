@@ -152,7 +152,17 @@ if __name__ == "__main__":
                     for chunk in missing_chunks:
                         print(chunk)
                     exit(1)
-
+            else:
+                depot = depot_tuple[0]
+                chunkfolder = join("depot", str(depot), "chunk")
+                chunks = [
+                    join(chunkfolder, f.name) for f in scandir(chunkfolder) if f.is_file()
+                ]
+                if args.decrypted:
+                    chunks = [chunk for chunk in chunks if chunk.endswith("_decrypted")]
+                else:
+                    chunks = [chunk for chunk in chunks if not chunk.endswith("_decrypted")]
+    
             write_sku = True
         else:
             depot = depot_tuple[0]
