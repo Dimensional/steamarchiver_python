@@ -13,6 +13,7 @@ import lzma
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import shutil
 
 _LOG = logging.getLogger("Chunkstore")
 
@@ -224,6 +225,27 @@ class Chunkstore():
                 csmfile.write(unhexlify(sha))
                 csmfile.write(pack("<Q L L", offset, 0, length))
 
+    def _create_temporary_chunkstore(self, temp_folder):
+        """
+        Creates a temporary chunkstore in the specified folder.
+
+        Args:
+            temp_folder (str): Path to the temporary folder.
+
+        Returns:
+            Chunkstore: A new Chunkstore instance for the temporary folder.
+        """
+        if not path.exists(temp_folder):
+            os.makedirs(temp_folder)
+
+        return Chunkstore(
+            folder=temp_folder,
+            depot=self.depot,
+            depot_key=self.depot_key,
+            is_encrypted=self.is_encrypted,
+            max_file_size=self.max_file_size
+        )
+
     ### Checks if a file with the given SHA1 already exists in the chunkstore.
     ### This method is used to avoid duplicates when writing chunks, something that shouldn't happen at all.
     def file_exists(self, sha):
@@ -411,6 +433,90 @@ class Chunkstore():
         except Exception as e:
             _LOG.error(f"Error processing chunk {sha_hex}: {e}")
             raise ValueError(f"Error processing chunk {sha_hex}: {e}")
+
+    def repackage_or_update(self, new_files=None, file_path=None):
+        """
+        Repackages the chunkstore if chunks are out of order or new files are provided.
+
+        Args:
+            new_files (list, optional): List of file paths to include in the chunkstore. Defaults to None.
+        """
+        print("Checking if repackaging is required...")
+
+        # Step 1: Check if chunks are sorted
+        conn = self._get_thread_local_connection()
+        cursor = conn.execute("SELECT sha FROM chunks ORDER BY sha")
+        sorted_shas = [row[0] for row in cursor.fetchall()]
+
+        cursor = conn.execute("SELECT sha FROM chunks ORDER BY chunkstore_index, offset")
+        index_sorted_shas = [row[0] for row in cursor.fetchall()]
+
+        repackage_needed = sorted_shas != index_sorted_shas
+
+        # Step 2: Check for new files
+        if new_files:
+            for file_path in new_files:
+                sha = path.basename(file_path).replace("_decrypted", "") if not self.is_encrypted else path.basename(file_path)
+                if sha not in sorted_shas:
+                    print(f"New file detected: {file_path}")
+                    repackage_needed = True
+                    break
+
+        # Step 3: Repackage if needed
+        if repackage_needed:
+            print("Repackaging chunkstore...")
+            temp_folder = path.join(self.folder, "temp_rebuild")
+            temp_chunkstore = self._create_temporary_chunkstore(temp_folder)
+
+            try:
+                # Combine existing chunks and new files
+                combined_chunks = list(conn.execute("SELECT sha, chunkstore_index, offset, length FROM chunks"))
+                if new_files:
+                    for file_path in new_files:
+                        sha = path.basename(file_path).replace("_decrypted", "") if not self.is_encrypted else path.basename(file_path)
+                        if sha not in sorted_shas:
+                            combined_chunks.append((sha, None, None, path.getsize(file_path)))
+
+                # Sort combined chunks by SHA
+                combined_chunks = sorted(combined_chunks, key=lambda chunk: chunk[0])
+
+                # Write to the temporary chunkstore
+                for sha, _, _, length in combined_chunks:
+                    if _ is None:  # New file
+                        if not self.is_encrypted:
+                            sha += "_decrypted"  # Append "_decrypted" if not encrypted
+                        with open(path.join(file_path, sha), "rb") as file:
+                            content = file.read()
+                            temp_chunkstore.write_chunk(unhexlify(sha), content)
+                    else:  # Existing chunk
+                        content = self.get_chunk(sha, process=False)
+                        temp_chunkstore.write_chunk(unhexlify(sha), content)
+
+                # Finalize the temporary chunkstore
+                temp_chunkstore.write_csm()
+
+                # Replace the original chunkstore with the temporary one
+                print("Replacing original chunkstore with rebuilt chunkstore...")
+                self.close()
+                for file in os.listdir(self.folder):
+                    if file.endswith(".csd") or file.endswith(".csm"):
+                        os.remove(path.join(self.folder, file))
+                for file in os.listdir(temp_folder):
+                    os.rename(path.join(temp_folder, file), path.join(self.folder, file))
+                os.rmdir(temp_folder)
+
+                # Reload the chunkstore
+                self.__init__(self.folder, depot=self.depot, is_encrypted=self.is_encrypted)
+                print("Repackaging complete.")
+            except Exception as e:
+                print(f"Error during repackaging: {e}")
+                raise
+            finally:
+                temp_chunkstore.close()
+                if path.exists(temp_folder):
+                    shutil.rmtree(temp_folder)
+        else:
+            print("Chunkstore is already up to date. No repackaging needed.")
 
     ### Unpacks all files from the chunkstore into the specified output folder using multithreading.
     ### This method is called to process each chunk in parallel using ThreadPoolExecutor.
