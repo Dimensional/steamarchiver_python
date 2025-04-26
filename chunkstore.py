@@ -18,14 +18,14 @@ import shutil
 _LOG = logging.getLogger("Chunkstore")
 
 class Chunkstore():
-    def __init__(self, folder, depot=None, depot_key=None, is_encrypted=None, max_file_size=2**30): # Limits to 1GB per file
+    def __init__(self, folder, depot=None, depot_key=None, is_encrypted=None, max_file_size=2**31): # Limits to 2GB per file
         """Initializes the Chunkstore class.
 
         Args:
             folder (str): Path to the folder where chunk files are stored.
             depot (int, optional): Depot ID associated with the chunkstore. Defaults to None.
             is_encrypted (bool, optional): Indicates whether the chunkstore is encrypted. Defaults to None.
-            max_file_size (int, optional): Maximum size of each chunk file in bytes. Defaults to 2**30 (1GB).
+            max_file_size (int, optional): Maximum size of each chunk file in bytes. Defaults to 2**31 (2GB).
 
         Raises:
             Exception: If the specified folder does not exist.
