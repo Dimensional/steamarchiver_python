@@ -99,16 +99,18 @@ def parse_size(size_str):
     else:
         size = None
 
-    if size is None or size < 500 * (1024 ** 2):
-        print("Invalid size format or size below 500 MiB. Using default size of 500 MiB.")
+
+    
+    if size is None:
+        print("Invalid size format. Using default size of 500 MiB.")
         size = 500 * (1024 ** 2)
-
-    return size
-
-    # Enforce minimum size of 500 MiB
-    if size < 500 * (1024 ** 2):
-        raise ValueError("Size must be at least 500 MiB.")
-
+    elif size < 500 * (1024 ** 2):
+        print("Size below 500 MiB. Using default size of 500 MiB.")
+        size = 500 * (1024 ** 2)
+    elif size > 2 * (1024 ** 3):
+        print("Size exceeds 2 GiB. Using default size of 2 GiB.")
+        size = 2 * (1024 ** 3)
+    
     return size
 
 def main(depot_id, chunkstore_folder, use_chunk_folder=False, force=False, max_size=None):
