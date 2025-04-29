@@ -225,7 +225,7 @@ class Chunkstore():
                 csmfile.write(unhexlify(sha))
                 csmfile.write(pack("<Q L L", offset, 0, length))
 
-    def _create_temporary_chunkstore(self, temp_folder):
+    def _create_temporary_chunkstore(self, temp_folder, max_size=None):
         """
         Creates a temporary chunkstore in the specified folder.
 
@@ -241,9 +241,8 @@ class Chunkstore():
         return Chunkstore(
             folder=temp_folder,
             depot=self.depot,
-            depot_key=self.depot_key,
             is_encrypted=self.is_encrypted,
-            max_file_size=self.max_file_size
+            max_file_size=max_size if max_size else self.max_file_size
         )
 
     ### Checks if a file with the given SHA1 already exists in the chunkstore.
@@ -434,12 +433,15 @@ class Chunkstore():
             _LOG.error(f"Error processing chunk {sha_hex}: {e}")
             raise ValueError(f"Error processing chunk {sha_hex}: {e}")
 
-    def repackage_or_update(self, new_files=None, file_path=None):
+    def repackage_or_update(self, new_files=None, file_path=None, force=False, max_size=None):
         """
         Repackages the chunkstore if chunks are out of order or new files are provided.
 
         Args:
             new_files (list, optional): List of file paths to include in the chunkstore. Defaults to None.
+            file_path (str, optional): Path to the file to be added. Defaults to None.
+            force (bool, optional): Whether to force repackaging regardless of current state. Defaults to False.
+            max_size (int, optional): Maximum size (in bytes) for splitting chunkstore files. Defaults to None.
         """
         print("Checking if repackaging is required...")
 
@@ -463,10 +465,10 @@ class Chunkstore():
                     break
 
         # Step 3: Repackage if needed
-        if repackage_needed:
+        if repackage_needed or force:
             print("Repackaging chunkstore...")
             temp_folder = path.join(self.folder, "temp_rebuild")
-            temp_chunkstore = self._create_temporary_chunkstore(temp_folder)
+            temp_chunkstore = self._create_temporary_chunkstore(temp_folder, max_size=max_size)
 
             try:
                 # Combine existing chunks and new files
