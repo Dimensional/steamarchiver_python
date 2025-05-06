@@ -17,6 +17,7 @@ if __name__ == "__main__": # exit before we import our shit if the args are wron
     args = parser.parse_args()
 
 from steam.client import SteamClient
+from steam.client.cdn import CDNClient
 from steam.core.msg import MsgProto
 from steam.enums import EResult
 from steam.enums.emsg import EMsg
@@ -43,9 +44,17 @@ if __name__ == "__main__":
     if len(args.appids) > 0:
         appids = args.appids
     else:
-        print("Fetching list of apps from WebAPI...")
-        for app in WebAPI(None).ISteamApps.GetAppList_v2()['applist']['apps']:
-            appids.append(app['appid'])
+        # Get all appids from the CDN client
+        print("Fetching list of owned apps from CDN...")
+        c = CDNClient(steam_client)
+        appids.extend(c.licensed_app_ids)
+        
+        ## Commented out because it takes a while to get the app list from WebAPI
+        ## and usually fails when getting the tokens
+        # print("Fetching list of apps from WebAPI...")
+        # for app in WebAPI(None).ISteamApps.GetAppList_v2()['applist']['apps']:
+        #     appids.append(app['appid'])
+        
         # Write the current changenumber, for use later with update_appinfo
         with open("./last_change.txt", "w") as f:
             msg = MsgProto(EMsg.ClientPICSChangesSinceRequest)

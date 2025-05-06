@@ -99,8 +99,6 @@ def parse_size(size_str):
     else:
         size = None
 
-
-    
     if size is None:
         print("Invalid size format. Using default size of 500 MiB.")
         size = 500 * (1024 ** 2)

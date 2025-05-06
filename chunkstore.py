@@ -220,10 +220,13 @@ class Chunkstore():
                 ORDER BY offset
             """, (index,))
             chunks = cursor.fetchall()
-            csmfile.write(pack("<L L", self.depot, len(chunks)))  # Chunk count
+            csmfile.write(pack("<L L", self.depot, len(chunks)))  # Depot ID (4 bytes) and chunk count (4 bytes)
             for sha, offset, length in chunks:
-                csmfile.write(unhexlify(sha))
-                csmfile.write(pack("<Q L L", offset, 0, length))
+                csmfile.write(unhexlify(sha)) # SHA1 (20 bytes)
+                csmfile.write(pack("<Q L L", offset, 0, length)) # Offset (8 bytes), Reserved (4 bytes), Length (4 bytes)
+                ### The 4 byte "Reserved" field is not used in this implementation, but it's included for completeness.
+                ### If a CSM is generated from Steam Backups, this field is set to 0x00001000.
+                ### As such it may have an undocumented function.
 
     def _create_temporary_chunkstore(self, temp_folder, max_size=None):
         """
