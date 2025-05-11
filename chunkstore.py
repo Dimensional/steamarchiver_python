@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from binascii import hexlify, unhexlify
 from os import path
-from struct import pack, unpack
+from struct import pack, unpack, unpack_from
 import sys
 import signal
 import os
@@ -14,6 +14,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import shutil
+import zstandard
 
 _LOG = logging.getLogger("Chunkstore")
 
@@ -838,6 +839,21 @@ class Chunkstore():
                     return sha_hex, False
                 except Exception as e:
                     print(f"\033[31mERROR: Zip decompression failed\033[0m {e}")
+                    return sha_hex, False
+            elif content[:2] == b'VS':  # Zstandard
+                print("Testing (Zstandard) from chunk", sha_hex)
+                crc32 = unpack_from('<I', content, 4)[0]
+                crc32_footer = unpack_from('<I', content, -15)[0]
+                size_decompressed = unpack_from('<I', content, -11)[0]
+                if crc32 != crc32_footer:
+                    print("ERROR: CRC32 checksum mismatch (expected %s, got %s)" % (hexlify(crc32.to_bytes(4, 'little')).decode(), hexlify(crc32_footer.to_bytes(4, 'little')).decode()))
+                    return sha_hex, False
+                if content[-3:] != b'zsv':
+                    print("ERROR: Invalid ZStandard Footer")
+                    return sha_hex, False
+                decompressed = zstandard.decompress(content[8:-15])
+                if len(decompressed) != size_decompressed:
+                    print("ERROR: Decompressed size mismatch (expected %d, got %d)" % (size_decompressed, len(decompressed)))
                     return sha_hex, False
             else:
                 print(f"\033[31mERROR: unknown archive type\033[0m {content[:2].decode()}")

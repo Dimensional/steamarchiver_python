@@ -30,6 +30,7 @@ from pathlib import Path
 from sys import argv
 from zipfile import ZipFile
 import lzma
+import zstandard
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import time
@@ -41,6 +42,7 @@ from steam.core.manifest import DepotManifest
 from steam.core.crypto import symmetric_decrypt
 from chunkstore import Chunkstore
 from migration import migration_needed, migrate
+import struct
 
 if __name__ == "__main__": # exit before we import our shit if the args are wrong
     parser = ArgumentParser(description='Extract downloaded depots.')
@@ -140,8 +142,34 @@ def process_chunk(chunk, chunk_path, args, file, badfiles):
                 print("Testing", file.filename, "(Zip) from chunk", chunkhex)
             else:
                 print("Extracting", file.filename, "(Zip) from chunk", chunkhex)
-            zipfile = ZipFile(BytesIO(decrypted))
-            decompressed = zipfile.read(zipfile.filelist[0])
+            with ZipFile(BytesIO(decrypted)) as zip_file:
+                decompressed = zip_file.read(zip_file.filelist[0])
+        elif decrypted[:2] == b'VS':  # Zstandard
+            if args.dry_run:
+                print("Testing", file.filename, "(Zstandard) from chunk", chunkhex)
+            else:
+                print("Extracting", file.filename, "(Zstandard) from chunk", chunkhex)
+            crc32 = struct.unpack_from('<I', decrypted, 4)[0]
+            crc32_footer = struct.unpack_from('<I', decrypted, -15)[0]
+            size_decompressed = struct.unpack_from('<I', decrypted, -11)[0]
+            if crc32 != crc32_footer:
+                print("ERROR: CRC32 checksum mismatch (expected %s, got %s)" % (hexlify(crc32.to_bytes(4, 'little')).decode(), hexlify(crc32_footer.to_bytes(4, 'little')).decode()))
+                badfiles.append(chunkhex)
+                return None
+            if decrypted[-3:] != b'zsv':
+                print("ERROR: Invalid ZStandard Footer")
+                badfiles.append(chunkhex)
+                return None
+            decompressed = zstandard.decompress(decrypted[8:-15])
+            if len(decompressed) != size_decompressed:
+                print("ERROR: Decompressed size mismatch (expected %d, got %d)" % (size_decompressed, len(decompressed)))
+                badfiles.append(chunkhex)
+                return None
+            # crc32_data = zstandard.crc32(decrypted[8:-15])  # Calculate CRC32 of the data
+            # if crc32_data != crc32_footer:
+            #     print("ERROR: CRC32 checksum mismatch for data (expected %s, got %s)" % (hexlify(crc32_footer.to_bytes(4, 'little')).decode(), hexlify(crc32_data.to_bytes(4, 'little')).decode()))
+            #     badfiles.append(chunkhex)
+            #     return None
         else:
             print("ERROR: unknown archive type", decrypted[:2].decode())
             badfiles.append(chunkhex)
@@ -156,6 +184,7 @@ def process_chunk(chunk, chunk_path, args, file, badfiles):
         return (chunk.offset, decompressed, chunkhex)
     except Exception as e:
         print(f"Error processing chunk {chunkhex}: {e}")
+        badfiles.append(chunkhex)
         return None
 
 def validate_file(file_path, expected_sha1):
