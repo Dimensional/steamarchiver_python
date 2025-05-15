@@ -36,7 +36,7 @@ def get_chunk_files(depot_id, encrypted=True):
 
     return chunk_folder, files
 
-def update_sku_sis(chunkstore_folder, chunkstore):
+def update_sku_sis(chunkstore_folder, chunkstore, manifest=None):
     """
     Updates the `chunkstores` section in the `sku.sis` file if it exists.
 
@@ -56,8 +56,14 @@ def update_sku_sis(chunkstore_folder, chunkstore):
 
         # Update the `chunkstores` section
         chunkstore_info = chunkstore.get_chunkstore_file_info()
-        sku_data["chunkstores"] = {
-            str(index): {"size": size} for index, size in chunkstore_info.items()
+        
+        if manifest is not None:
+            # Update only the manifest for the current depot, preserving others
+            manifests = sku_data["sku"].get("manifests", {})
+            manifests[str(chunkstore.depot)] = str(manifest)
+            sku_data["sku"]["manifests"] = manifests
+        sku_data["sku"]["chunkstores"][str(chunkstore.depot)] = {
+            str(index): str(file_size) for index, file_size in chunkstore_info.items()
         }
 
         # Write the updated VDF back to the file
@@ -111,7 +117,13 @@ def parse_size(size_str):
     
     return size
 
-def main(depot_id, chunkstore_folder, use_chunk_folder=False, force=False, max_size=None):
+#def main(depot_id, chunkstore_folder, use_chunk_folder=False, force=False, max_size=None):
+def main(args, max_size=None):
+    depot_id = args.depot_id
+    chunkstore_folder = args.chunkstore_folder
+    use_chunk_folder = args.read_chunks
+    force = args.force
+    manifest = args.manifest
     """
     Repackages chunkstores for the specified chunkstore folder.
 
@@ -126,7 +138,7 @@ def main(depot_id, chunkstore_folder, use_chunk_folder=False, force=False, max_s
         # Initialize Chunkstore
         print(f"Initializing Chunkstore for folder: {chunkstore_folder}")
         chunkstore = Chunkstore(chunkstore_folder, depot=depot_id)
-        encrypted = chunkstore.is_encrypted()
+        encrypted = chunkstore.is_encrypted
         print(f"Chunkstore is {'encrypted' if encrypted else 'not encrypted'}.")
 
         chunk_files = None
@@ -136,13 +148,14 @@ def main(depot_id, chunkstore_folder, use_chunk_folder=False, force=False, max_s
             path, chunk_files = get_chunk_files(depot_id, encrypted=encrypted)
 
         # Repackage or update
+        chunkstore_info = chunkstore.get_chunkstore_file_info()
         print("Starting repackaging process...")
         chunkstore.repackage_or_update(
             new_files=chunk_files, file_path=path, force=force, max_size=max_size
         )
-
+        chunkstore_info = chunkstore.get_chunkstore_file_info()
         # Update `sku.sis` if it exists
-        update_sku_sis(chunkstore_folder, chunkstore)
+        update_sku_sis(chunkstore_folder, chunkstore, manifest=manifest)
 
         print("Repackaging completed successfully.")
     except Exception as e:
@@ -176,6 +189,11 @@ if __name__ == "__main__":
         # help="Maximum size for splitting chunkstore files (e.g., '500MiB', '2GiB'). Minimum is 500 MiB.",
         help=argparse.SUPPRESS,  # Hide the --size argument from help output
     )
+    parser.add_argument(
+        "--manifest",
+        type=int,
+        help="If specified, prints the specific manifest to any existing sku.",
+    )
 
     args = parser.parse_args()
 
@@ -189,4 +207,4 @@ if __name__ == "__main__":
         print(f"Error: {e}")
         sys.exit(1)
 
-    main(args.depot_id, args.chunkstore_folder, args.read_chunks, args.force, max_size_bytes)
+    main(args, max_size_bytes)

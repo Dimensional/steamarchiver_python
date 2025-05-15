@@ -55,7 +55,7 @@ class Chunkstore():
             self._thread_local_lock = threading.Lock()  # Lock for thread-local registry
 
             # Load existing files after the database is initialized
-            self._load_existing_files_to_connection(self.conn)
+            self._load_existing_files_to_connection(self.conn, update_files=True)
         
             # Register signal handlers
             self._register_signal_handlers()
@@ -78,7 +78,7 @@ class Chunkstore():
         if not hasattr(self._thread_local, "conn"):
             self._thread_local.conn = sqlite3.connect(":memory:")
             self._init_database(self._thread_local.conn)
-            self._load_existing_files_to_connection(self._thread_local.conn)
+            self._load_existing_files_to_connection(self._thread_local.conn, update_files=False)
             # Register the connection in the shared registry
             with self._thread_local_lock:
                 self._thread_local_registry[threading.get_ident()] = self._thread_local.conn
@@ -118,7 +118,7 @@ class Chunkstore():
     ### This method is called when initializing the Chunkstore or when loading existing files.
     ### It checks for encryption consistency and calls _parse_csm_metadata_to_connection to parse metadata.
     ### The metadata is then inserted into the SQLite database.
-    def _load_existing_files_to_connection(self, conn):
+    def _load_existing_files_to_connection(self, conn, update_files=True):
         """Loads existing CSD/CSM pairs for the depot and rebuilds the SQLite database."""
         if self.depot is None:
             depot_ids = set()
@@ -143,7 +143,8 @@ class Chunkstore():
             csm_path = path.join(self.folder, base_name + ".csm")
             if path.exists(csd_path):
                 # Append the CSD and CSM file paths as a tuple to self.files
-                self.files.append((csd_path, csm_path))
+                if update_files and (csd_path, csm_path) not in self.files:
+                    self.files.append((csd_path, csm_path))
 
         if self.files:
             # Check encryption consistency before parsing metadata
@@ -168,7 +169,7 @@ class Chunkstore():
 
             # Read the chunk count
             depot_id, chunk_count = unpack("<L L", csmfile.read(8))
-            if self.depot != depot_id:
+            if int(self.depot) != int(depot_id):
                 raise Exception(f"Depot ID mismatch in file {csm_path}. "
                                 f"Expected {self.depot}, found {depot_id}.")
 
@@ -219,9 +220,9 @@ class Chunkstore():
                 SELECT sha, offset, length FROM chunks
                 WHERE chunkstore_index = ?
                 ORDER BY offset
-            """, (index,))
+            """, (int(index),))
             chunks = cursor.fetchall()
-            csmfile.write(pack("<L L", self.depot, len(chunks)))  # Depot ID (4 bytes) and chunk count (4 bytes)
+            csmfile.write(pack("<L L", int(self.depot), len(chunks)))  # Depot ID (4 bytes) and chunk count (4 bytes)
             for sha, offset, length in chunks:
                 csmfile.write(unhexlify(sha)) # SHA1 (20 bytes)
                 csmfile.write(pack("<Q L L", offset, 0, length)) # Offset (8 bytes), Reserved (4 bytes), Length (4 bytes)
@@ -456,15 +457,15 @@ class Chunkstore():
 
         cursor = conn.execute("SELECT sha FROM chunks ORDER BY chunkstore_index, offset")
         index_sorted_shas = [row[0] for row in cursor.fetchall()]
-
+        
         repackage_needed = sorted_shas != index_sorted_shas
 
         # Step 2: Check for new files
         if new_files:
-            for file_path in new_files:
-                sha = path.basename(file_path).replace("_decrypted", "") if not self.is_encrypted else path.basename(file_path)
+            for chunk_file in new_files:
+                sha = path.basename(chunk_file).replace("_decrypted", "") if not self.is_encrypted else path.basename(chunk_file)
                 if sha not in sorted_shas:
-                    print(f"New file detected: {file_path}")
+                    print(f"New file detected: {chunk_file}")
                     repackage_needed = True
                     break
 
@@ -476,42 +477,55 @@ class Chunkstore():
 
             try:
                 # Combine existing chunks and new files
-                combined_chunks = list(conn.execute("SELECT sha, chunkstore_index, offset, length FROM chunks"))
+                combined_chunks = list(conn.execute("SELECT sha, chunkstore_index FROM chunks"))
                 if new_files:
-                    for file_path in new_files:
-                        sha = path.basename(file_path).replace("_decrypted", "") if not self.is_encrypted else path.basename(file_path)
+                    for chunk_file in new_files:
+                        sha = path.basename(chunk_file).replace("_decrypted", "") if not self.is_encrypted else path.basename(chunk_file)
                         if sha not in sorted_shas:
-                            combined_chunks.append((sha, None, None, path.getsize(file_path)))
+                            combined_chunks.append((sha, None))  # New file with no index
 
                 # Sort combined chunks by SHA
                 combined_chunks = sorted(combined_chunks, key=lambda chunk: chunk[0])
 
                 # Write to the temporary chunkstore
-                for sha, _, _, length in combined_chunks:
-                    if _ is None:  # New file
+                rebuild = 0
+                new = 0
+                for sha, index in combined_chunks:
+                    if index is None:  # New file
+                        # Format output for better readability
+                        label = "Adding new chunk:"
+                        print(f"{label:>30} {sha}")
                         if not self.is_encrypted:
-                            sha += "_decrypted"  # Append "_decrypted" if not encrypted
-                        with open(path.join(file_path, sha), "rb") as file:
+                            sha_filename = sha + "_decrypted"  # Append "_decrypted" if not encrypted
+                        else:
+                            sha_filename = sha
+                        with open(path.join(file_path, sha_filename), "rb") as file:
                             content = file.read()
                             temp_chunkstore.write_chunk(unhexlify(sha), content)
+                        new += 1
                     else:  # Existing chunk
+                        label = "Repackaging existing chunk:"
+                        print(f"{label:>30} {sha}")
                         content = self.get_chunk(sha, process=False)
                         temp_chunkstore.write_chunk(unhexlify(sha), content)
+                        rebuild += 1
 
                 # Finalize the temporary chunkstore
+                print(f"Repackaging complete: {rebuild} repackaged, {new} new files.")
+                print("Finalizing temporary chunkstore...")
                 temp_chunkstore.write_csm()
 
                 # Replace the original chunkstore with the temporary one
                 print("Replacing original chunkstore with rebuilt chunkstore...")
                 self.close()
-                for file in os.listdir(self.folder):
-                    if file.endswith(".csd") or file.endswith(".csm"):
-                        os.remove(path.join(self.folder, file))
+                for csd_path, csm_path in self.files:
+                    if path.exists(csd_path):
+                        os.remove(csd_path)
+                    if path.exists(csm_path):
+                        os.remove(csm_path)
                 for file in os.listdir(temp_folder):
                     os.rename(path.join(temp_folder, file), path.join(self.folder, file))
-                os.rmdir(temp_folder)
-
-                # Reload the chunkstore
+                
                 self.__init__(self.folder, depot=self.depot, is_encrypted=self.is_encrypted)
                 print("Repackaging complete.")
             except Exception as e:
@@ -523,6 +537,7 @@ class Chunkstore():
                     shutil.rmtree(temp_folder)
         else:
             print("Chunkstore is already up to date. No repackaging needed.")
+            self.close()
 
     ### Unpacks all files from the chunkstore into the specified output folder using multithreading.
     ### This method is called to process each chunk in parallel using ThreadPoolExecutor.
