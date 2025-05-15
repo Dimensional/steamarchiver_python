@@ -580,7 +580,10 @@ if __name__ == "__main__":
             with open(path.join('./branches', f"{appid}_{branch}.key"), "rb") as f:
                 branch_key = f.read()
         if depotid:
-            name = appinfo['depots'][str(depotid)]['name'] if 'name' in appinfo['depots'][str(depotid)] else 'unknown'
+            if 'depots' in appinfo and str(depotid) in appinfo['depots'] and 'name' in appinfo['depots'][str(depotid)]:
+                name = appinfo['depots'][str(depotid)]['name']
+            else:
+                name = 'unknown'
             if manifestid:
                 print("Archiving", appinfo['common']['name'], "depot", depotid, "manifest", manifestid)
                 exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, branch), c, name, args.dry_run, args.server, args.backup) else 1)
