@@ -109,25 +109,22 @@ def process_file(chunk_path, chunk, badfiles):
                 return chunkhex, False
         elif decrypted[:2] == b'VS':  # Zstandard
             size_decompressed = unpack_from('<I', decrypted, -11)[0]
-            if args.dry_run:
-                print("Testing (Zstandard) from chunk", chunkhex, "Size:", size_decompressed)
-            else:
-                print("Extracting (Zstandard) from chunk", chunkhex, "Size:", size_decompressed)
+            print("Testing (Zstandard) from chunk", chunkhex, "Size:", size_decompressed)
             crc32 = unpack_from('<I', decrypted, 4)[0]
             crc32_footer = unpack_from('<I', decrypted, -15)[0]
             if crc32 != crc32_footer:
                 print("ERROR: CRC32 checksum mismatch (expected %s, got %s)" % (hexlify(crc32.to_bytes(4, 'little')).decode(), hexlify(crc32_footer.to_bytes(4, 'little')).decode()))
                 badfiles.append(chunkhex)
-                return None
+                return chunkhex, False
             if decrypted[-3:] != b'zsv':
                 print("ERROR: Invalid ZStandard Footer")
                 badfiles.append(chunkhex)
-                return None
+                return chunkhex, False
             decompressed = zstandard.decompress(decrypted[8:-15])
             if len(decompressed) != size_decompressed:
                 print("ERROR: Decompressed size mismatch (expected %d, got %d)" % (size_decompressed, len(decompressed)))
                 badfiles.append(chunkhex)
-                return None
+                return chunkhex, False
             # crc32_data = zstandard.crc32(decrypted[8:-15])  # Calculate CRC32 of the data
             # if crc32_data != crc32_footer:
             #     print("ERROR: CRC32 checksum mismatch for data (expected %s, got %s)" % (hexlify(crc32_footer.to_bytes(4, 'little')).decode(), hexlify(crc32_data.to_bytes(4, 'little')).decode()))
@@ -178,10 +175,13 @@ if __name__ == "__main__":
         try:
             chunkstore = Chunkstore(args.backup, args.depotid, args.depotkey)
             chunklist = chunkstore.validate_chunks(threads=args.threads)
-            print("Bad Files:")
-            for sha, valid in chunklist.items():
-                if not valid:
-                    print(sha)
+            if not any(not valid for valid in chunklist.values()):
+                print("No bad files found")
+            else:
+                print("Bad Files:")
+                for sha, valid in chunklist.items():
+                    if not valid:
+                        print(sha)
         finally:
             chunkstore.close()
     else:       
