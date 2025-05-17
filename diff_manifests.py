@@ -77,6 +77,8 @@ if __name__ == "__main__":
                     new_size_original += chunk.cb_original
                     new_size_compressed += chunk.cb_compressed
             else:
+                if chunk.cb_compressed != old_chunks[chunk.sha].cb_compressed:
+                    print(f"chunk {hexlify(chunk.sha).decode()} compressed size changed: old={old_chunks[chunk.sha].cb_compressed}, new={chunk.cb_compressed}")
                 del old_chunks[chunk.sha]
                 if not chunk.sha in chunks_found:
                     chunks_found.append(chunk.sha)
