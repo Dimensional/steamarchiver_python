@@ -458,14 +458,16 @@ class Chunkstore():
         cursor = conn.execute("SELECT sha FROM chunks ORDER BY chunkstore_index, offset")
         index_sorted_shas = [row[0] for row in cursor.fetchall()]
         
-        repackage_needed = sorted_shas != index_sorted_shas
+        if (sorted_shas != index_sorted_shas):
+            print("Chunks are not sorted. Repackaging needed.")
+            repackage_needed = True
 
         # Step 2: Check for new files
         if new_files:
             for chunk_file in new_files:
                 sha = path.basename(chunk_file).replace("_decrypted", "") if not self.is_encrypted else path.basename(chunk_file)
                 if sha not in sorted_shas:
-                    print(f"New file detected: {chunk_file}")
+                    print(f"New file(s) detected. Repackaging needed.")
                     repackage_needed = True
                     break
 
