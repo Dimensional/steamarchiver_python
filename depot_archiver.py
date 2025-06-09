@@ -341,7 +341,7 @@ def try_load_manifest(appid, depotid, manifestid, branch='public', password=None
                         license_requested = True
                         continue
                     print(e.message + ": " + EResult(e.eresult).name)
-                    print(f"Use the -i flag to log into a Steam account with access to this depot, or place a downloaded copy of the manifest at depots/{depotid}/manifest/{manifestid}.manif5")
+                    print(f"Use the -i flag to log into a Steam account with access to this depot, or place a downloaded copy of the manifest at depot/{depotid}/manifest/{manifestid}.manif5")
                     return False
                 elif e.eresult == EResult.Timeout:
                     steam_client.reconnect()

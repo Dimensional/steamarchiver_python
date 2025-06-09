@@ -49,7 +49,7 @@ if __name__ == "__main__":
         chunks = sorted(set(chunks))
     
     try:
-        chunkstore = Chunkstore(path.join(args.target, "chunkstore"), depot=args.depot)
+        chunkstore = Chunkstore(args.target, depot=args.depot)
     
         depot_id = chunkstore.depot
         output_folder = path.join(args.output, str(depot_id))
