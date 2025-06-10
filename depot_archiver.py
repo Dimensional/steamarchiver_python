@@ -486,7 +486,7 @@ if __name__ == "__main__":
     elif args.username and args.password:
         auto_login(steam_client, args.username, args.password, loginId=args.login_id)
     elif args.username:
-        auto_login(steam_client, args.username, loginId=args)
+        auto_login(steam_client, args.username, loginId=args.login_id)
     else:
         auto_login(steam_client, loginId=args.login_id)
     
