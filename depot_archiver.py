@@ -34,14 +34,16 @@ class BranchAction(Action):
 def read_csv_file(csv_file):
     app_depot_list = []
     with open(csv_file, mode='r') as file:
-        csv_reader = csv.reader(file)
-        next(csv_reader)  # Skip header row
+        csv_reader = csv.DictReader(file)
         for row in csv_reader:
+            # Enforce required fields
+            if not row.get('AppID') or not row.get('DepotID') or not row.get('ManifestID'):
+                raise ValueError("CSV row missing required AppID, DepotID, or ManifestID.")
             app_depot_list.append({
-                'appid': int(row[0]),
-                'depotid': int(row[1]) if row[1] else None,
-                'manifestid': int(row[2]) if row[2] else None,
-                'branch': row[3] if row[3] else None
+                'appid': int(row['AppID']),
+                'depotid': int(row['DepotID']),
+                'manifestid': int(row['ManifestID']),
+                'branch': row['Branch'] if row.get('Branch') else None
             })
     return app_depot_list
 
