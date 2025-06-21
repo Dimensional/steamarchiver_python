@@ -144,7 +144,7 @@ def process_chunk(chunk, chunk_path, args, file, badfiles):
                 print("Extracting", file.filename, "(Zip) from chunk", chunkhex)
             with ZipFile(BytesIO(decrypted)) as zip_file:
                 decompressed = zip_file.read(zip_file.filelist[0])
-        elif decrypted[:2] == b'VS':  # Zstandard
+        elif decrypted[:4] == b'VSZa':  # Zstandard
             if args.dry_run:
                 print("Testing", file.filename, "(Zstandard) from chunk", chunkhex)
             else:

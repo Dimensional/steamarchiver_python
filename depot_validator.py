@@ -107,7 +107,7 @@ def process_file(chunk_path, chunk, badfiles):
                 print(f"\033[31mFailed to decompress:\033[0m {chunkhex}")
                 badfiles.put(chunkhex)
                 return chunkhex, False
-        elif decrypted[:2] == b'VS':  # Zstandard
+        elif decrypted[:4] == b'VSZa':  # Zstandard
             size_decompressed = unpack_from('<I', decrypted, -11)[0]
             print("Testing (Zstandard) from chunk", chunkhex, "Size:", size_decompressed)
             crc32 = unpack_from('<I', decrypted, 4)[0]

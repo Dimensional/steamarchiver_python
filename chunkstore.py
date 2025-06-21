@@ -429,7 +429,7 @@ class Chunkstore():
                 except Exception as e:
                     _LOG.error(f"Unknown error during Zip decompression for chunk {sha_hex}: {e}")
                     raise ValueError(f"Unknown error during Zip decompression for chunk {sha_hex}: {e}")
-            elif content[:2] == b'\x28\xB5':  # Zstandard
+            elif content[:4] == b'VSZa':  # Zstandard
                 print(f"Extracting {(filename + ' ' if filename else '')}(Zstandard) from chunk {sha_hex}")
                 try:
                     crc32 = unpack_from('<I', content, 4)[0]
@@ -885,7 +885,7 @@ class Chunkstore():
                 except Exception as e:
                     print(f"\033[31mERROR: Zip decompression failed\033[0m {e}")
                     return sha_hex, False
-            elif content[:2] == b'VS':  # Zstandard
+            elif content[:4] == b'VSZa':  # Zstandard
                 print("Testing (Zstandard) from chunk", sha_hex)
                 crc32 = unpack_from('<I', content, 4)[0]
                 crc32_footer = unpack_from('<I', content, -15)[0]
