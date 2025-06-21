@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from binascii import hexlify, unhexlify
-from os import path
+from os import path, pwrite
 from struct import pack, unpack, unpack_from
 import sys
 import signal
@@ -286,7 +286,6 @@ class Chunkstore():
         incomplete_file_path = os.path.normpath(f"{final_file_path}.incomplete")
         conn = self._get_thread_local_connection()
         sha_list = [hexlify(chunk.sha).decode() for chunk in file.chunks]
-        sha_data = {}
         sha_offsets = {hexlify(chunk.sha).decode(): chunk.offset for chunk in file.chunks}
         result = conn.execute(
             "SELECT sha, chunkstore_index, offset, length FROM chunks WHERE sha IN ({})".format(
@@ -298,19 +297,18 @@ class Chunkstore():
             threads = max(1, os.cpu_count() - 1)
         else:
             threads = max(1, min(threads, os.cpu_count()))
-
         try:
             with ThreadPoolExecutor(max_workers=threads) as executor:
-                future_to_chunk = {
+                futures = [
                     executor.submit(self.grab_chunk, chunk, depotkey)
                     for chunk in result
-                }
-                for future in as_completed(future_to_chunk):
+                ]
+                for future in as_completed(futures):
+                    sha, content = future.result()
+                    offset = sha_offsets[sha]
+                    # Use pwrite to write at the correct offset in a thread-safe way
                     with open(incomplete_file_path, "r+b") as output_file:
-                        for future in as_completed(future_to_chunk):
-                            sha, content = future.result()
-                            output_file.seek(sha_offsets[sha])
-                            output_file.write(content)
+                        pwrite(output_file.fileno(), content, offset)
             os.rename(incomplete_file_path, final_file_path)
             print(f"File reconstructed: {filename}")
         except Exception as e:
@@ -891,16 +889,78 @@ class Chunkstore():
                 self._thread_local.conn.close()
                 del self._thread_local.conn
 
-if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        chunkstore = None
-        try:
-            chunkstore = Chunkstore(sys.argv[1])  # Initialize the Chunkstore
-            print(chunkstore)  # Perform operations (e.g., print its representation)
-        except KeyboardInterrupt:
-            print("Processing interrupted by user.")
-        except Exception as e:
-            print(f"An error occurred: {e}")
-        finally:
-            if chunkstore:
-                chunkstore.close()  # Ensure the SQLite connection is closed
+class ChunkstoreCSMDebug:
+    """
+    Debug utility for reading and inspecting CSM files in a folder for a specific depot.
+    Exports CSM metadata to a CSV file, including calculated CSD size if the chunk ended the file.
+    """
+    def __init__(self, folder, depot_id):
+        self.folder = folder
+        self.depot_id = int(depot_id)
+        self.csm_files = []
+        self.chunks = []
+        self._find_csm_files()
+        self._parse_all_csm()
+
+    def _find_csm_files(self):
+        # Find all CSM files in the folder that match the depot_id
+        for filename in os.listdir(self.folder):
+            if filename.endswith(".csm") and filename.startswith(f"{self.depot_id}_"):
+                self.csm_files.append(os.path.join(self.folder, filename))
+        self.csm_files.sort()
+
+    def _parse_all_csm(self):
+        for idx, csm_path in enumerate(self.csm_files, start=1):
+            with open(csm_path, "rb") as f:
+                header = f.read(12)
+                if header[:4] != b"SCFS":
+                    raise ValueError(f"Not a valid CSM file (missing SCFS header): {csm_path}")
+                depot_id, chunk_count = unpack("<L L", f.read(8))
+                if int(depot_id) != self.depot_id:
+                    continue  # Skip files not matching the specified depot_id
+                for _ in range(chunk_count):
+                    sha = f.read(20)
+                    offset, reserved, length = unpack("<Q L L", f.read(16))
+                    self.chunks.append({
+                        "csm_file": csm_path,
+                        "csm_index": idx,
+                        "sha": sha.hex(),
+                        "offset": offset,
+                        "reserved": reserved,
+                        "length": length,
+                        "csd_end": offset + length
+                    })
+
+    def export_csv(self, output_csv_path):
+        import csv
+        """
+        Exports chunk metadata to a CSV file.
+        Columns: sha, csm_index, offset, length, csd_end
+        """
+        with open(output_csv_path, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(["sha", "csm_index", "offset", "length", "csd_end"])
+            for chunk in self.chunks:
+                writer.writerow([
+                    chunk["sha"],
+                    chunk["csm_index"],
+                    chunk["offset"],
+                    chunk["length"],
+                    chunk["csd_end"]
+                ])
+        print(f"Exported chunk metadata to {output_csv_path}")
+
+# Commented out as chunkstore.py is not meant to be run directly.
+# if __name__ == "__main__":
+#     if len(sys.argv) > 1:
+#         chunkstore = None
+#         try:
+#             chunkstore = Chunkstore(sys.argv[1])  # Initialize the Chunkstore
+#             print(chunkstore)  # Perform operations (e.g., print its representation)
+#         except KeyboardInterrupt:
+#             print("Processing interrupted by user.")
+#         except Exception as e:
+#             print(f"An error occurred: {e}")
+#         finally:
+#             if chunkstore:
+#                 chunkstore.close()  # Ensure the SQLite connection is closed
