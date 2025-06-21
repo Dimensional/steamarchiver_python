@@ -269,13 +269,13 @@ class Chunkstore():
     ## This method is called by the ThreadPoolExecutor to process chunks in parallel.
     ## It uses the same logic as get_chunk, but processes multiple chunks at once
     ## from a single SQL query result.
-    def grab_chunk(self, chunk, depotkey=None):
+    def grab_chunk(self, chunk, depotkey=None, filename=None):
         sha, chunkstore_index, offset, length = chunk
         csd_path, _ = self.files[chunkstore_index - 1]
         with open(csd_path, "rb") as csdfile:  # Open a new file handle for this thread
             csdfile.seek(offset)
             data = csdfile.read(length)
-            return sha, self.process_chunks(sha, data, depotkey)
+            return sha, self.process_chunks(sha, data, depotkey, filename)
 
     ## Reconstructs a file from its chunks and writes it to the specified final file path.
     ## The file is reconstructed in a temporary incomplete file and then renamed to the final file path.
@@ -310,7 +310,7 @@ class Chunkstore():
         try:
             with ThreadPoolExecutor(max_workers=threads) as executor:
                 future_to_sha = {
-                    executor.submit(self.grab_chunk, chunk, depotkey): chunk[0]
+                    executor.submit(self.grab_chunk, chunk, depotkey, filename): chunk[0]
                     for chunk in result
                 }
                 with open(incomplete_file_path, "r+b") as output_file:
@@ -402,13 +402,13 @@ class Chunkstore():
 
     ### Processes a chunk by decrypting and decompressing it based on its type.
     ### This method is called by the get_chunk and grab_chunk methods to handle chunk processing.
-    def process_chunks(self, sha_hex, content, depot_key=None):
+    def process_chunks(self, sha_hex, content, depot_key=None, filename=None):
         try:
             if self.is_encrypted and depot_key:
                 content = symmetric_decrypt(content, depot_key)
                         
             if content[:2] == b'VZ':  # LZMA
-                print("Extracting (LZMA) from chunk", sha_hex)
+                print(f"Extracting {(filename + ' ' if filename else '')}(LZMA) from chunk {sha_hex}")
                 try:
                     decompressed_size = unpack('<i', content[-6:-2])[0]
                     decompressed = lzma.LZMADecompressor(
@@ -419,7 +419,7 @@ class Chunkstore():
                     _LOG.error(f"LZMA decompression failed for chunk {sha_hex}: {e}")
                     raise ValueError(f"LZMA decompression failed for chunk {sha_hex}: {e}")
             elif content[:2] == b'PK':  # Zip
-                print("Extracting (Zip) from chunk", sha_hex)
+                print(f"Extracting {(filename + ' ' if filename else '')}(Zip) from chunk {sha_hex}")
                 try:
                     with ZipFile(BytesIO(content)) as zipfile:
                         decompressed = zipfile.read(zipfile.filelist[0])
@@ -429,6 +429,25 @@ class Chunkstore():
                 except Exception as e:
                     _LOG.error(f"Unknown error during Zip decompression for chunk {sha_hex}: {e}")
                     raise ValueError(f"Unknown error during Zip decompression for chunk {sha_hex}: {e}")
+            elif content[:2] == b'\x28\xB5':  # Zstandard
+                print(f"Extracting {(filename + ' ' if filename else '')}(Zstandard) from chunk {sha_hex}")
+                try:
+                    crc32 = unpack_from('<I', content, 4)[0]
+                    crc32_footer = unpack_from('<I', content, -15)[0]
+                    size_decompressed = unpack_from('<I', content, -11)[0]
+                    if crc32 != crc32_footer:
+                        _LOG.error("ERROR: CRC32 checksum mismatch (expected %s, got %s)" % (hexlify(crc32.to_bytes(4, 'little')).decode(), hexlify(crc32_footer.to_bytes(4, 'little')).decode()))
+                        raise ValueError("ERROR: CRC32 checksum mismatch (expected %s, got %s)" % (hexlify(crc32.to_bytes(4, 'little')).decode(), hexlify(crc32_footer.to_bytes(4, 'little')).decode()))
+                    if content[-3:] != b'zsv':
+                        _LOG.error("ERROR: Invalid ZStandard Footer")
+                        raise ValueError("ERROR: Invalid ZStandard Footer")
+                    decompressed = zstandard.decompress(content[8:-15])
+                    if len(decompressed) != size_decompressed:
+                        _LOG.error("ERROR: Decompressed size mismatch (expected %d, got %d)" % (size_decompressed, len(decompressed)))
+                        raise ValueError("ERROR: Decompressed size mismatch (expected %d, got %d)" % (size_decompressed, len(decompressed)))
+                except zstandard.ZstdError as e:
+                    _LOG.error(f"Zstandard decompression failed for chunk {sha_hex}: {e}")
+                    raise ValueError(f"Zstandard decompression failed for chunk {sha_hex}: {e}")
             else:
                 _LOG.error(f"Unknown archive type for chunk {sha_hex}: {content[:2].decode()}")
                 raise ValueError(f"Unknown archive type for chunk {sha_hex}: {content[:2].decode()}")
