@@ -285,15 +285,23 @@ class Chunkstore():
         final_file_path = os.path.normpath(final_file)
         incomplete_file_path = os.path.normpath(f"{final_file_path}.incomplete")
         conn = self._get_thread_local_connection()
-        sha_list = [hexlify(chunk.sha).decode() for chunk in file.chunks]
-        sha_data = {}
-        sha_offsets = {hexlify(chunk.sha).decode(): chunk.offset for chunk in file.chunks}
+        # Create a list of (sha, offset) tuples for each chunk in the file
+        sha_offset_list = [(hexlify(chunk.sha).decode(), chunk.offset) for chunk in file.chunks]
+        sha_list = [sha for sha, _ in sha_offset_list]
+
+        # Build a mapping from sha to all its offsets
+        from collections import defaultdict
+        sha_offsets = defaultdict(list)
+        for sha, offset in sha_offset_list:
+            sha_offsets[sha].append(offset)
+
         result = conn.execute(
             "SELECT sha, chunkstore_index, offset, length FROM chunks WHERE sha IN ({})".format(
                 ",".join("?" for _ in sha_list)
             ),
             sha_list
         ).fetchall()
+
         if threads is None:
             threads = max(1, os.cpu_count() - 1)
         else:
@@ -301,15 +309,16 @@ class Chunkstore():
 
         try:
             with ThreadPoolExecutor(max_workers=threads) as executor:
-                future_to_chunk = {
-                    executor.submit(self.grab_chunk, chunk, depotkey)
+                future_to_sha = {
+                    executor.submit(self.grab_chunk, chunk, depotkey): chunk[0]
                     for chunk in result
                 }
-                for future in as_completed(future_to_chunk):
-                    with open(incomplete_file_path, "r+b") as output_file:
-                        for future in as_completed(future_to_chunk):
-                            sha, content = future.result()
-                            output_file.seek(sha_offsets[sha])
+                with open(incomplete_file_path, "r+b") as output_file:
+                    for future in as_completed(future_to_sha):
+                        sha, content = future.result()
+                        # Write the chunk at all offsets where it appears
+                        for offset in sha_offsets[sha]:
+                            output_file.seek(offset)
                             output_file.write(content)
             os.rename(incomplete_file_path, final_file_path)
             print(f"File reconstructed: {filename}")
