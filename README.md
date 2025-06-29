@@ -102,7 +102,7 @@ Usage for the Python scripts:
 - ``steam_websocket_mitm.py`` is an mitmproxy script to inspect Steam's
   WebSockets network traffic. This is only really useful for debugging.
 - ``login.py`` runs an interactive login for testing purposes.
-- - **This script does not need to be run directly to set up a Steam session.**
+- - **This script does not need to be run directly for downloading purposes.**
 - ``chunkstore.py`` loads a .csd/.csm and lists the depot ID, encryption, and
   number of chunks without unpacking anything.
 
