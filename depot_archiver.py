@@ -53,7 +53,7 @@ if __name__ == "__main__": # exit before we import our shit if the args are wron
     log_group = parser.add_mutually_exclusive_group()
     server_group = parser.add_mutually_exclusive_group()
     dl_group.add_argument("-a", type=int, metavar=("appid","depotid"), action=AppDepotAction, nargs='+', help="App, depot, and manifest ID to download. If the manifest ID is omitted, the lastest manifest specified by the public branch will be downloaded.\nIf the depot ID is omitted, all depots specified by the public branch will be downloaded.")
-    dl_group.add_argument("-w", type=int, nargs='?', help="Workshop file ID to download.", dest="workshop_id")
+    dl_group.add_argument("-w", type=str, action='append', help="Workshop file ID(s) to download. Can specify multiple times or comma-separated values.", dest="workshop_ids")
     dl_group.add_argument("-csv", type=str, help="Path to CSV file containing appId, DepotID, ManifestID, and Branch name.", dest="csv_file")
     parser.add_argument("-r", type=str, nargs='?', help="Branch Name.", dest="branch", action=BranchAction)
     parser.add_argument("-n", type=str, nargs='?', help="Branch Password", dest="bpassword")
@@ -90,15 +90,30 @@ if __name__ == "__main__": # exit before we import our shit if the args are wron
     if args.csv_file:
         args.app_depot = read_csv_file(args.csv_file)
 
-    if not args.app_depot and not args.workshop_id and not args.csv_file:
+    # Parse workshop IDs (handle comma-separated values)
+    workshop_ids = []
+    if args.workshop_ids:
+        for workshop_arg in args.workshop_ids:
+            # Handle comma-separated values
+            for workshop_id in workshop_arg.split(','):
+                workshop_id = workshop_id.strip()
+                if workshop_id:
+                    try:
+                        workshop_ids.append(int(workshop_id))
+                    except ValueError:
+                        print(f"Invalid workshop ID: {workshop_id}")
+                        exit(1)
+        args.workshop_ids = workshop_ids
+
+    if not args.app_depot and not args.workshop_ids and not args.csv_file:
         print("must specify at least one appid, workshop file id, or CSV file")
         parser.print_help()
         exit(1)
-    if args.app_depot and args.workshop_id:
+    if args.app_depot and args.workshop_ids:
         print("must specify only app or workshop item, not both")
         parser.print_help()
         exit(1)
-    if args.branch and args.workshop_id:
+    if args.branch and args.workshop_ids:
         print("The Workshop doesn't have branches. Unable to continue")
         parser.print_help()
         exit(1)
@@ -131,10 +146,18 @@ from login import auto_login
 from chunkstore import Chunkstore
 from migration import migration_needed, migrate
 
-def save_manifest_to_json(manifest, output_dir):
+def save_manifest_to_json(manifest, output_dir, workshop_id=None, workshop_name=None):
     debug_dir = path.join(output_dir, "debug")
     makedirs(debug_dir, exist_ok=True)
-    manifest_path = path.join(debug_dir, f"{manifest.depot_id}_{manifest.gid}.json")
+    
+    # If this is a workshop file, use workshop ID and name in the JSON filename
+    if workshop_id and workshop_name:
+        # Sanitize workshop name for filename use
+        safe_name = "".join(c for c in workshop_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        safe_name = safe_name.replace(' ', '_')
+        manifest_path = path.join(debug_dir, f"{workshop_id}_{safe_name}_{manifest.gid}.json")
+    else:
+        manifest_path = path.join(debug_dir, f"{manifest.depot_id}_{manifest.gid}.json")
     if path.exists(manifest_path):
         return
     
@@ -183,12 +206,12 @@ def save_manifest_to_json(manifest, output_dir):
     
     print(f"Manifest saved to {manifest_path}")
 
-def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override=None, backup=False):
+def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override=None, backup=False, workshop_id=None, workshop_name=None):
     if not manifest:
         return False
     print("Archiving", manifest.depot_id, "(%s)" % (name), "gid", manifest.gid, "from", datetime.fromtimestamp(manifest.creation_time))
     if args.debug_manifest:
-        save_manifest_to_json(manifest, "./depot/" + str(manifest.depot_id))
+        save_manifest_to_json(manifest, "./depot/" + str(manifest.depot_id), workshop_id, workshop_name)
     if dry_run:
         print("Not downloading chunks (dry run)")
         return True
@@ -304,9 +327,17 @@ def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override
     print("Downloaded %s %s and skipped %s" % (download_state.chunks_dled, "chunk" if download_state.chunks_dled == 1 else "chunks", download_state.chunks_skipped))
     return True
 
-def try_load_manifest(appid, depotid, manifestid, branch='public', password=None):
+def try_load_manifest(appid, depotid, manifestid, branch='public', password=None, workshop_id=None, workshop_name=None):
     print(f"Getting a manifest for app {appid} depot {depotid} gid {manifestid}")
-    dest = "./depot/%s/manifest/%s.manif5" % (depotid, manifestid)
+    
+    # If this is a workshop file, use workshop ID and name in the manifest filename
+    if workshop_id and workshop_name:
+        # Sanitize workshop name for filename use
+        safe_name = "".join(c for c in workshop_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        safe_name = safe_name.replace(' ', '_')
+        dest = "./depot/%s/manifest/%s_%s_%s.manif5" % (depotid, workshop_id, safe_name, manifestid)
+    else:
+        dest = "./depot/%s/manifest/%s.manif5" % (depotid, manifestid)
     if path.exists(dest):
         with open(dest, "rb") as f:
             print("Loaded cached manifest %s from disk" % manifestid)
@@ -503,24 +534,31 @@ if __name__ == "__main__":
     
     c = CDNClient(steam_client)
 
-    if args.workshop_id:
-        response = steam_client.send_um_and_wait("PublishedFile.GetDetails#1", {'publishedfileids':[args.workshop_id]})
-        if response.header.eresult != EResult.OK:
-            print("\033[31merror: couldn't get workshop item info:\033[0m", response.header.error_message)
-            exit(1)
-        file = response.body.publishedfiledetails[0]
-        if file.result != EResult.OK:
-            print("\033[31merror: steam returned error\033[0m", EResult(file.result))
-            exit(1)
-        print("Retrieved data for workshop item", file.title, "for app", file.consumer_appid, "(%s)" % file.app_name)
-        if not file.hcontent_file:
-            print("\033[31merror: workshop item is not on SteamPipe\033[0m")
-            exit(1)
-        if file.file_url:
-            print("\033[31merror: workshop item is not on SteamPipe: its download URL is\033[0m", file.file_url)
-            exit(1)
-        archive_manifest(try_load_manifest(file.consumer_appid, file.consumer_appid, file.hcontent_file), c, file.title, args.dry_run, args.server, args.backup)
-        exit(0)
+    if args.workshop_ids:
+        exit_status = 0
+        for workshop_id in args.workshop_ids:
+            response = steam_client.send_um_and_wait("PublishedFile.GetDetails#1", {'publishedfileids':[workshop_id]})
+            if response.header.eresult != EResult.OK:
+                print(f"\033[31merror: couldn't get workshop item info for {workshop_id}:\033[0m", response.header.error_message)
+                exit_status += 1
+                continue
+            file = response.body.publishedfiledetails[0]
+            if file.result != EResult.OK:
+                print(f"\033[31merror: steam returned error for workshop item {workshop_id}:\033[0m", EResult(file.result))
+                exit_status += 1
+                continue
+            print(f"Retrieved data for workshop item {workshop_id}: '{file.title}' for app {file.consumer_appid} ({file.app_name})")
+            if not file.hcontent_file:
+                print(f"\033[31merror: workshop item {workshop_id} is not on SteamPipe\033[0m")
+                exit_status += 1
+                continue
+            if file.file_url:
+                print(f"\033[31merror: workshop item {workshop_id} is not on SteamPipe: its download URL is\033[0m", file.file_url)
+                exit_status += 1
+                continue
+            success = archive_manifest(try_load_manifest(file.consumer_appid, file.consumer_appid, file.hcontent_file, workshop_id=workshop_id, workshop_name=file.title), c, file.title, args.dry_run, args.server, args.backup, workshop_id, file.title)
+            exit_status += (0 if success else 1)
+        exit(exit_status)
 
     # Iterate over all the downloads we want
     exit_status = 0
