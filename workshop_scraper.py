@@ -6,6 +6,7 @@ import json
 import argparse
 import os
 import re
+import math
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -107,40 +108,27 @@ def build_url(app_id, page, date_start=None, date_end=None, required_tags=None, 
     return BASE_URL + "?" + "&".join(f"{k}={v}" for k, v in params.items())
 
 def get_max_page(app_id, date_start=None, date_end=None, required_tags=None, excluded_tags=None):
-    url = build_url(app_id, 1, date_start, date_end, required_tags, excluded_tags)
-    print("Fetching page 1 to determine total number of pages...")
-    response = requests.get(url, headers=HEADERS)
-    if not response.ok:
-        print("Failed to retrieve page 1 for pagination detection.")
-        return None
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    paging_div = soup.find("div", class_="workshopBrowsePagingControls")
-    if not paging_div:
-        print("Pagination controls not found.")
-        return None
-
-    page_links = paging_div.find_all("a", class_="pagelink")
-    page_numbers = []
-    for link in page_links:
-        try:
-            num_text = link.text.strip().replace(',', '')
-            num = int(num_text)
-            page_numbers.append(num)
-        except ValueError:
-            continue
-
-    if not page_numbers:
-        print("No numeric page links found in pagination.")
-        return None
-
-    max_page = max(page_numbers)
-    print(f"Detected max page: {max_page}")
+    """Calculate max page based on total entries divided by items per page"""
+    total_entries = get_total_entries(app_id, date_start, date_end, required_tags, excluded_tags)
     
-    # Warn if we're hitting the Steam limit
+    if total_entries is None:
+        print("Failed to get total entries for max page calculation.")
+        return None
+    
+    if total_entries == 0:
+        print("No entries found - no pages to scrape.")
+        return 0
+    
+    # Calculate pages needed: total entries divided by items per page, rounded up
+    max_page = math.ceil(total_entries / ITEMS_PER_PAGE)
+    
+    print(f"Calculated max page: {max_page} (based on {total_entries:,} total entries)")
+    
+    # Warn if we're hitting the Steam limit, but don't cap the return value
+    # The capping should happen at the scraping level, not detection level
     if max_page >= MAX_SAFE_PAGES:
-        print(f"WARNING: Detected {max_page} pages, which exceeds Steam's safe limit of {MAX_SAFE_PAGES}.")
-        print("Consider using date range filters to break this into smaller chunks.")
+        print(f"WARNING: Calculated {max_page} pages, which exceeds Steam's safe limit of {MAX_SAFE_PAGES}.")
+        print("Consider using date range filters or --auto-smart to break this into smaller chunks.")
     
     return max_page
 
@@ -460,13 +448,16 @@ def handle_auto_split_scrape(args, date_start, date_end):
     for i, (month_start_ts, month_end_ts, month_start_str, month_end_str) in enumerate(monthly_ranges):
         print(f"\n=== Processing chunk {i+1}/{len(monthly_ranges)}: {month_start_str} to {month_end_str} ===")
         
-        # Estimate items for this range
-        estimated = estimate_items_for_range(args.appid, month_start_ts, month_end_ts, args.required_tags, args.excluded_tags)
-        print(f"Estimated items in this range: {estimated}")
-        
-        if estimated > MAX_SAFE_ITEMS:
-            print(f"WARNING: Range {month_start_str} to {month_end_str} has {estimated} items, exceeding safe limit.")
-            print("Consider manually breaking this range into smaller chunks.")
+        # Get exact item count for this range
+        item_count = get_total_entries(args.appid, month_start_ts, month_end_ts, args.required_tags, args.excluded_tags)
+        if item_count is not None:
+            print(f"Items in this range: {item_count:,}")
+            
+            if item_count > MAX_SAFE_ITEMS:
+                print(f"WARNING: Range {month_start_str} to {month_end_str} has {item_count:,} items, exceeding safe limit.")
+                print("Consider manually breaking this range into smaller chunks.")
+        else:
+            print("Could not determine item count for this range.")
         
         # Create chunk-specific args
         chunk_args = argparse.Namespace(**vars(args))
@@ -579,6 +570,12 @@ def handle_scrape_single_range(args, date_start, date_end):
     if end_page is None:
         print("Unable to determine the end page. Exiting.")
         return
+
+    # Cap end_page at Steam's safe limit for actual scraping
+    if end_page > MAX_SAFE_PAGES:
+        print(f"Capping end page from {end_page} to {MAX_SAFE_PAGES} for safe scraping.")
+        print("Use date range filters or --auto-smart to access all data.")
+        end_page = MAX_SAFE_PAGES
 
     return scrape_pages_range(args, start_page, end_page, date_start, date_end, 
                             seen_ids, stats, all_items, output_file, seen_ids_file, debug_log_file)
@@ -745,70 +742,221 @@ def get_total_entries(app_id, date_start=None, date_end=None, required_tags=None
         print(f"Error getting total entries: {e}")
         return None
 
-def auto_split_by_entries(app_id, date_start=None, date_end=None, required_tags=None, excluded_tags=None, max_entries=MAX_SAFE_ITEMS):
-    """Automatically split date ranges if they exceed the maximum safe entries"""
+def auto_split_by_entries(app_id, date_start=None, date_end=None, required_tags=None, excluded_tags=None, max_entries=MAX_SAFE_ITEMS, split_level="initial"):
+    """
+    Automatically split date ranges using structured hierarchy: year → month → week → day
+    
+    Args:
+        split_level: "initial", "year", "month", "week", or "day"
+    """
+    # Check total entries for this range
     total_entries = get_total_entries(app_id, date_start, date_end, required_tags, excluded_tags)
     
     if total_entries is None:
         return None
     
     if total_entries == 0:
-        print("No entries found for the given filters.")
+        print(f"No entries found for the given filters. (level: {split_level})")
         return []
     
     if total_entries <= max_entries:
-        print(f"Total entries ({total_entries:,}) is within safe limit ({max_entries:,})")
+        start_str = timestamp_to_date(date_start) if date_start else "beginning"
+        end_str = timestamp_to_date(date_end) if date_end else "end"
+        print(f"Range {start_str} to {end_str}: {total_entries:,} entries (within limit, level: {split_level})")
         return [(date_start, date_end)]
     
-    print(f"Total entries ({total_entries:,}) exceeds safe limit ({max_entries:,}). Auto-splitting...")
+    # Range exceeds limit, need to split
+    start_str = timestamp_to_date(date_start) if date_start else "beginning"
+    end_str = timestamp_to_date(date_end) if date_end else "end"
+    print(f"Range {start_str} to {end_str}: {total_entries:,} entries exceeds limit. Splitting at {split_level} level...")
     
-    # If no date range specified, we need to determine a reasonable range
-    if date_start is None or date_end is None:
-        # Only fall back to Steam Workshop launch date if we actually detected over 50k items without date filters
-        # This means we first tried without date constraints and found too many items
-        if date_start is None and date_end is None:
-            print("No date range specified and over 50k items detected. Using October 2011 (Steam Workshop launch) as fallback range.")
-            start_date = datetime(2011, 10, 13)  # Steam Workshop launch date
-            # Set end_date to the last day of the start_date's month
-            end_date = start_date.replace(day=calendar.monthrange(start_date.year, start_date.month)[1])
-        else:
-            # If user specified one date but not the other, use reasonable defaults
-            if date_start:
-                start_date = datetime.fromtimestamp(date_start)
-            else:
-                start_date = datetime(2011, 10, 13)  # Steam Workshop launch date
-            
-            if date_end:
-                end_date = datetime.fromtimestamp(date_end)
-            else:
-                # If only start date specified, use end of that month
-                end_date = start_date.replace(day=calendar.monthrange(start_date.year, start_date.month)[1])
-            
+    # Handle initial case (no date range specified)
+    if split_level == "initial" and (date_start is None or date_end is None):
+        print("No date range specified. Using Steam Workshop launch date as starting point.")
+        # Start from Steam Workshop launch date
+        start_date = datetime(2011, 10, 13)  # Steam Workshop launch date
+        end_date = datetime.now()  # Current date
         date_start = int(start_date.timestamp())
         date_end = int(end_date.timestamp())
+        # Continue with year-level splitting
+        split_level = "year"
     
-    # Generate date ranges and recursively check each one
-    start_date_str = timestamp_to_date(date_start)
-    end_date_str = timestamp_to_date(date_end)
+    # Structured hierarchy: year → month → week → day
+    if split_level in ["initial", "year"]:
+        return split_by_years(app_id, date_start, date_end, required_tags, excluded_tags, max_entries)
+    elif split_level == "month":
+        return split_by_months(app_id, date_start, date_end, required_tags, excluded_tags, max_entries)
+    elif split_level == "week":
+        return split_by_weeks(app_id, date_start, date_end, required_tags, excluded_tags, max_entries)
+    elif split_level == "day":
+        return split_by_days(app_id, date_start, date_end, required_tags, excluded_tags, max_entries)
+    else:
+        print(f"Cannot split further than day level. Range has {total_entries:,} entries.")
+        print("Consider using additional filters (tags) to reduce the dataset.")
+        return None
+
+def split_by_years(app_id, date_start, date_end, required_tags, excluded_tags, max_entries):
+    """Split date range by years"""
+    start_dt = datetime.fromtimestamp(date_start)
+    end_dt = datetime.fromtimestamp(date_end)
     
-    # Start with monthly ranges
-    monthly_ranges = generate_monthly_ranges(start_date_str, end_date_str)
     safe_ranges = []
+    current_year = start_dt.year
     
-    for month_start_ts, month_end_ts, month_start_str, month_end_str in monthly_ranges:
-        print(f"Checking range: {month_start_str} to {month_end_str}")
-        sub_ranges = auto_split_by_entries(app_id, month_start_ts, month_end_ts, required_tags, excluded_tags, max_entries)
+    while current_year <= end_dt.year:
+        # Year boundaries
+        year_start = datetime(current_year, 1, 1)
+        year_end = datetime(current_year, 12, 31, 23, 59, 59)
         
-        if sub_ranges is None:
-            # Error occurred, skip this range
-            print(f"Error processing range {month_start_str} to {month_end_str}, skipping...")
-            continue
-        elif len(sub_ranges) == 0:
-            # No entries in this range
-            print(f"No entries in range {month_start_str} to {month_end_str}")
-            continue
+        # Constrain to original range
+        actual_start = max(year_start, start_dt)
+        actual_end = min(year_end, end_dt)
+        
+        year_start_ts = int(actual_start.timestamp())
+        year_end_ts = int(actual_end.timestamp())
+        
+        print(f"Checking year {current_year}: {actual_start.strftime('%Y-%m-%d')} to {actual_end.strftime('%Y-%m-%d')}")
+        
+        # Recursively check this year
+        year_ranges = auto_split_by_entries(app_id, year_start_ts, year_end_ts, 
+                                          required_tags, excluded_tags, max_entries, "month")
+        
+        if year_ranges is None:
+            print(f"Error processing year {current_year}, skipping...")
+        elif len(year_ranges) == 0:
+            print(f"No entries in year {current_year}")
         else:
-            safe_ranges.extend(sub_ranges)
+            safe_ranges.extend(year_ranges)
+        
+        current_year += 1
+    
+    return safe_ranges
+
+def split_by_months(app_id, date_start, date_end, required_tags, excluded_tags, max_entries):
+    """Split date range by months"""
+    start_dt = datetime.fromtimestamp(date_start)
+    end_dt = datetime.fromtimestamp(date_end)
+    
+    safe_ranges = []
+    current = start_dt.replace(day=1)  # Start of month
+    
+    while current <= end_dt:
+        # Month boundaries
+        month_start = current
+        last_day = calendar.monthrange(current.year, current.month)[1]
+        month_end = current.replace(day=last_day, hour=23, minute=59, second=59)
+        
+        # Constrain to original range
+        actual_start = max(month_start, start_dt)
+        actual_end = min(month_end, end_dt)
+        
+        month_start_ts = int(actual_start.timestamp())
+        month_end_ts = int(actual_end.timestamp())
+        
+        print(f"Checking month {current.strftime('%Y-%m')}: {actual_start.strftime('%Y-%m-%d')} to {actual_end.strftime('%Y-%m-%d')}")
+        
+        # Recursively check this month
+        month_ranges = auto_split_by_entries(app_id, month_start_ts, month_end_ts,
+                                           required_tags, excluded_tags, max_entries, "week")
+        
+        if month_ranges is None:
+            print(f"Error processing month {current.strftime('%Y-%m')}, skipping...")
+        elif len(month_ranges) == 0:
+            print(f"No entries in month {current.strftime('%Y-%m')}")
+        else:
+            safe_ranges.extend(month_ranges)
+        
+        # Move to next month
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+    
+    return safe_ranges
+
+def split_by_weeks(app_id, date_start, date_end, required_tags, excluded_tags, max_entries):
+    """Split date range by weeks"""
+    start_dt = datetime.fromtimestamp(date_start)
+    end_dt = datetime.fromtimestamp(date_end)
+    
+    safe_ranges = []
+    current = start_dt
+    
+    while current <= end_dt:
+        # Week boundaries (Sunday to Saturday)
+        days_since_sunday = current.weekday() + 1  # Monday=0 in weekday(), so Sunday=6
+        if days_since_sunday == 7:
+            days_since_sunday = 0  # Sunday itself
+        
+        week_start = current - timedelta(days=days_since_sunday)
+        week_end = week_start + timedelta(days=6, hours=23, minutes=59, seconds=59)
+        
+        # Constrain to original range
+        actual_start = max(week_start, start_dt)
+        actual_end = min(week_end, end_dt)
+        
+        week_start_ts = int(actual_start.timestamp())
+        week_end_ts = int(actual_end.timestamp())
+        
+        print(f"Checking week {actual_start.strftime('%Y-%m-%d')} to {actual_end.strftime('%Y-%m-%d')}")
+        
+        # Recursively check this week
+        week_ranges = auto_split_by_entries(app_id, week_start_ts, week_end_ts,
+                                          required_tags, excluded_tags, max_entries, "day")
+        
+        if week_ranges is None:
+            print(f"Error processing week starting {actual_start.strftime('%Y-%m-%d')}, skipping...")
+        elif len(week_ranges) == 0:
+            print(f"No entries in week starting {actual_start.strftime('%Y-%m-%d')}")
+        else:
+            safe_ranges.extend(week_ranges)
+        
+        # Move to next week
+        current = week_end + timedelta(days=1)
+        current = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    return safe_ranges
+
+def split_by_days(app_id, date_start, date_end, required_tags, excluded_tags, max_entries):
+    """Split date range by days - finest granularity"""
+    start_dt = datetime.fromtimestamp(date_start)
+    end_dt = datetime.fromtimestamp(date_end)
+    
+    safe_ranges = []
+    current = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)  # Start of day
+    
+    while current <= end_dt:
+        # Day boundaries
+        day_start = current
+        day_end = current.replace(hour=23, minute=59, second=59)
+        
+        # Constrain to original range
+        actual_start = max(day_start, start_dt)
+        actual_end = min(day_end, end_dt)
+        
+        day_start_ts = int(actual_start.timestamp())
+        day_end_ts = int(actual_end.timestamp())
+        
+        print(f"Checking day {actual_start.strftime('%Y-%m-%d')}")
+        
+        # Check entries for this day (final level - no more splitting)
+        day_entries = get_total_entries(app_id, day_start_ts, day_end_ts, required_tags, excluded_tags)
+        
+        if day_entries is None:
+            print(f"Error getting entries for day {actual_start.strftime('%Y-%m-%d')}, skipping...")
+        elif day_entries == 0:
+            print(f"No entries on day {actual_start.strftime('%Y-%m-%d')}")
+        elif day_entries <= max_entries:
+            print(f"Day {actual_start.strftime('%Y-%m-%d')}: {day_entries:,} entries (within limit)")
+            safe_ranges.append((day_start_ts, day_end_ts))
+        else:
+            print(f"Day {actual_start.strftime('%Y-%m-%d')}: {day_entries:,} entries (exceeds limit)")
+            print("Cannot split further than day level. Consider using additional tag filters.")
+            # Still add it - user will need to handle this manually or use more specific filters
+            safe_ranges.append((day_start_ts, day_end_ts))
+        
+        # Move to next day
+        current += timedelta(days=1)
     
     return safe_ranges
 
@@ -858,13 +1006,6 @@ def generate_daily_ranges(start_date, end_date):
         current += timedelta(days=1)
     
     return ranges
-
-def estimate_items_for_range(app_id, date_start, date_end, required_tags=None, excluded_tags=None):
-    """Estimate the number of items in a date range by checking max pages"""
-    max_page = get_max_page(app_id, date_start, date_end, required_tags, excluded_tags)
-    if max_page is None:
-        return 0
-    return min(max_page * ITEMS_PER_PAGE, MAX_SAFE_ITEMS)
 
 def main():
     # Display CPU-based concurrency info at startup
