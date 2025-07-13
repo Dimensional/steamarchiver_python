@@ -15,7 +15,12 @@ import calendar
 # === CONFIGURATION ===
 ITEMS_PER_PAGE = 30
 BASE_URL = "https://steamcommunity.com/workshop/browse/"
-MAX_CONCURRENT_PAGES = 10  # Maximum number of pages to fetch simultaneously
+
+# Calculate optimal concurrent pages based on CPU cores
+# Max 10 pages, but don't exceed (CPU cores - 1) to leave resources for OS
+_cpu_count = os.cpu_count() or 1  # Fallback to 1 if cpu_count() returns None
+MAX_CONCURRENT_PAGES = min(10, max(1, _cpu_count - 1)) if _cpu_count > 1 else 1
+
 MAX_SAFE_PAGES = 1667  # Steam's hard limit on pagination
 MAX_SAFE_ITEMS = MAX_SAFE_PAGES * ITEMS_PER_PAGE  # 50,010 items
 
@@ -862,6 +867,10 @@ def estimate_items_for_range(app_id, date_start, date_end, required_tags=None, e
     return min(max_page * ITEMS_PER_PAGE, MAX_SAFE_ITEMS)
 
 def main():
+    # Display CPU-based concurrency info at startup
+    cpu_count = os.cpu_count() or 1
+    print(f"Detected {cpu_count} CPU core(s). Using {MAX_CONCURRENT_PAGES} concurrent page requests.")
+    
     parser = argparse.ArgumentParser(description="Steam Workshop Scraper and Converter")
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
     subparsers.required = True
