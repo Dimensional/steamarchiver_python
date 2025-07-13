@@ -338,6 +338,8 @@ def handle_scrape(args):
 
     print(f"Scraping Steam Workshop for App ID {args.appid} from page {start_page} to {end_page}")
     print(f"Output: {output_file} ({args.format})")
+    if args.force:
+        print("Force mode enabled: Will not stop early when fewer than 30 items are found per page")
 
     total_pages = end_page - start_page + 1
     
@@ -362,9 +364,10 @@ def handle_scrape(args):
                 if new_items:
                     all_items.extend(new_items)
 
-                    # Optional auto-stop if fewer items than expected, and end-page wasn't user-set
-                    if args.end_page is None and len(new_items) < ITEMS_PER_PAGE:
+                    # Optional auto-stop if fewer items than expected, end-page wasn't user-set, and force is not enabled
+                    if args.end_page is None and not args.force and len(new_items) < ITEMS_PER_PAGE:
                         tqdm.write("Fewer than 30 items on this page. Assuming last page. Stopping early.")
+                        tqdm.write("Use --force to disable early termination and continue scraping.")
                         pbar.update(1)  # Update for this page
                         break
                 elif not new_items:
@@ -413,6 +416,7 @@ def main():
     scrape_parser.add_argument("-f", "--format", choices=["csv", "json"], default="csv", help="Output file format")
     scrape_parser.add_argument("--start-page", type=int, default=1, help="Page number to start scraping from (default: 1)")
     scrape_parser.add_argument("--end-page", type=int, help="Page number to stop scraping (inclusive). If not set, auto-detected from workshop.")
+    scrape_parser.add_argument("--force", action="store_true", help="Force scraping through all pages without early termination when fewer than 30 items are found")
     scrape_parser.set_defaults(func=handle_scrape)
     
     # Convert subcommand
