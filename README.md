@@ -60,6 +60,8 @@ Usage for the Python scripts:
     Steam will disconnect from your client. By Default, Login ID is generated based
     on your PC's private IP Address, so having 2 connections to steam from the same
     PC will conflict. Using this Argument with a random set of numbers will fix this
+  - Additionally can take the output generated from workshop_scraper as input for the
+  `-wf` argument. **Mutually exclusive from downloading game depots**
 - ``depot_validator.py`` verifies every chunk in a depot folder to ensure none of
   the files are corrupted or bad.
 - ``get_depot_keys.py`` logs into a Steam account and dumps all the depot keys
@@ -105,6 +107,16 @@ Usage for the Python scripts:
 - - **This script does not need to be run directly for downloading purposes.**
 - ``chunkstore.py`` loads a .csd/.csm and lists the depot ID, encryption, and
   number of chunks without unpacking anything.
+- ``workshop_scraper.py`` is used to scrape the workshop page for an app.
+  - This can export to a csv or json file.
+  - There is a limitation in how many items and pages can be viewed depending
+  on the workshop filter, up to 50,010 items (1667 pages).
+  - use `--date-start` and `--date-end` in `yyyy-mm-dd` format to narrow the
+  filtering down. Can go back as far as October of 2011, when Steam Workshop
+  first released.
+  - Some pages display with less than 30 items, which will cause the script to
+  end prematurely. Use `--force` to have it continue going until it reaches the
+  final calculated page.
 
 The folder steamlancache contains an HTTP server (written in Golang) that you
 can use as a LAN cache for Steam to speed up downloads and automatically archive
@@ -154,6 +166,10 @@ Extract those binaries:
 (Note: the key for the above command was found in depot_keys.txt, in this line:)
 
     232253		bdbeae4f56fa865d8df2f76623d3346fcd7e56df6dee13b0f23e4a0fe160a446	TF2 Linux client
+
+Scrape RimWorld's Workshop:
+    
+    python3 workshop_scraper.py scrape 294100 -o RimWorld
 
 ## License
 
