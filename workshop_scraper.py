@@ -440,93 +440,118 @@ def handle_auto_split_scrape(args, date_start, date_end):
     
     print(f"Splitting date range {start_date_str} to {end_date_str} into monthly chunks")
     
-    monthly_ranges = generate_monthly_ranges(start_date_str, end_date_str)
-    
-    total_stats = {'total_found': 0, 'added': 0, 'skipped': 0}
-    total_items = 0
-    
-    for i, (month_start_ts, month_end_ts, month_start_str, month_end_str) in enumerate(monthly_ranges):
-        print(f"\n=== Processing chunk {i+1}/{len(monthly_ranges)}: {month_start_str} to {month_end_str} ===")
+    try:
+        monthly_ranges = generate_monthly_ranges(start_date_str, end_date_str)
         
-        # Get exact item count for this range
-        item_count = get_total_entries(args.appid, month_start_ts, month_end_ts, args.required_tags, args.excluded_tags)
-        if item_count is not None:
-            print(f"Items in this range: {item_count:,}")
+        total_stats = {'total_found': 0, 'added': 0, 'skipped': 0}
+        total_items = 0
+        
+        for i, (month_start_ts, month_end_ts, month_start_str, month_end_str) in enumerate(monthly_ranges):
+            print(f"\n=== Processing chunk {i+1}/{len(monthly_ranges)}: {month_start_str} to {month_end_str} ===")
             
-            if item_count > MAX_SAFE_ITEMS:
-                print(f"WARNING: Range {month_start_str} to {month_end_str} has {item_count:,} items, exceeding safe limit.")
-                print("Consider manually breaking this range into smaller chunks.")
+            # Get exact item count for this range
+            item_count = get_total_entries(args.appid, month_start_ts, month_end_ts, args.required_tags, args.excluded_tags)
+            if item_count is not None:
+                print(f"Items in this range: {item_count:,}")
+                
+                if item_count > MAX_SAFE_ITEMS:
+                    print(f"WARNING: Range {month_start_str} to {month_end_str} has {item_count:,} items, exceeding safe limit.")
+                    print("Consider manually breaking this range into smaller chunks.")
+            else:
+                print("Could not determine item count for this range.")
+            
+            # Create chunk-specific args
+            chunk_args = argparse.Namespace(**vars(args))
+            chunk_args.date_start = month_start_str
+            chunk_args.date_end = month_end_str
+            chunk_args.auto_split = False  # Prevent recursive splitting
+            
+            # Scrape this chunk
+            try:
+                handle_scrape(chunk_args)
+                print(f"Completed chunk {i+1}/{len(monthly_ranges)}")
+            except Exception as e:
+                print(f"Error processing chunk {month_start_str} to {month_end_str}: {e}")
+                continue
+        
+        print(f"\n=== Auto-split scraping complete ===")
+        print(f"Processed {len(monthly_ranges)} monthly chunks")
+        
+    except KeyboardInterrupt:
+        print(f"\n=== Auto-split scraping interrupted during scraping phase ===")
+        if 'i' in locals():
+            print(f"Completed {i}/{len(monthly_ranges)} monthly chunks before interruption.")
         else:
-            print("Could not determine item count for this range.")
-        
-        # Create chunk-specific args
-        chunk_args = argparse.Namespace(**vars(args))
-        chunk_args.date_start = month_start_str
-        chunk_args.date_end = month_end_str
-        chunk_args.auto_split = False  # Prevent recursive splitting
-        
-        # Scrape this chunk
-        try:
-            handle_scrape(chunk_args)
-            print(f"Completed chunk {i+1}/{len(monthly_ranges)}")
-        except Exception as e:
-            print(f"Error processing chunk {month_start_str} to {month_end_str}: {e}")
-            continue
-    
-    print(f"\n=== Auto-split scraping complete ===")
-    print(f"Processed {len(monthly_ranges)} monthly chunks")
+            print("Interruption occurred during initial setup.")
+        print("Progress has been saved for completed chunks.")
+        return
 
 def handle_smart_auto_split_scrape(args, date_start, date_end):
     """Handle smart auto-split scraping by checking entry counts and recursively splitting"""
     print("Smart auto-split mode enabled. Analyzing entry counts to determine optimal splitting...")
     
-    # PHASE 1: Analyze and determine all safe ranges (NO multi-threading here)
-    print("Phase 1: Analyzing entries and determining safe filter ranges...")
-    safe_ranges = auto_split_by_entries(args.appid, date_start, date_end, args.required_tags, args.excluded_tags)
-    
-    if safe_ranges is None:
-        print("Error: Could not determine safe ranges. Falling back to regular scraping.")
-        return handle_scrape_single_range(args, date_start, date_end)
-    
-    if len(safe_ranges) == 0:
-        print("No entries found for the given filters.")
+    try:
+        # PHASE 1: Analyze and determine all safe ranges (NO multi-threading here)
+        # KeyboardInterrupt during this phase will cause complete cancellation
+        print("Phase 1: Analyzing entries and determining safe filter ranges...")
+        safe_ranges = auto_split_by_entries(args.appid, date_start, date_end, args.required_tags, args.excluded_tags)
+        
+        if safe_ranges is None:
+            print("Error: Could not determine safe ranges. Falling back to regular scraping.")
+            return handle_scrape_single_range(args, date_start, date_end)
+        
+        if len(safe_ranges) == 0:
+            print("No entries found for the given filters.")
+            return
+        
+        print(f"Phase 1 complete: Split into {len(safe_ranges)} safe range(s) for scraping")
+        
+    except KeyboardInterrupt:
+        print("\n=== Analysis phase interrupted by user ===")
+        print("No data has been collected yet - cancelling operation.")
         return
     
-    print(f"Phase 1 complete: Split into {len(safe_ranges)} safe range(s) for scraping")
-    
     # PHASE 2: Scrape each range sequentially (multi-threading only within each range)
+    # KeyboardInterrupt during this phase will save progress and exit gracefully
     print("Phase 2: Sequential scraping with per-range multi-threading...")
     total_stats = {'total_found': 0, 'added': 0, 'skipped': 0}
     
-    for i, (range_start_ts, range_end_ts) in enumerate(safe_ranges):
-        start_str = timestamp_to_date(range_start_ts) if range_start_ts else "beginning"
-        end_str = timestamp_to_date(range_end_ts) if range_end_ts else "end"
+    try:
+        for i, (range_start_ts, range_end_ts) in enumerate(safe_ranges):
+            start_str = timestamp_to_date(range_start_ts) if range_start_ts else "beginning"
+            end_str = timestamp_to_date(range_end_ts) if range_end_ts else "end"
+            
+            print(f"\n=== Processing range {i+1}/{len(safe_ranges)}: {start_str} to {end_str} ===")
+            
+            # Check entry count for this specific range before scraping
+            range_entries = get_total_entries(args.appid, range_start_ts, range_end_ts, args.required_tags, args.excluded_tags)
+            if range_entries is not None:
+                range_pages = math.ceil(range_entries / ITEMS_PER_PAGE)
+                print(f"Range has {range_entries:,} entries ({range_pages} pages)")
+            
+            # Create range-specific args
+            range_args = argparse.Namespace(**vars(args))
+            range_args.date_start = start_str if range_start_ts else None
+            range_args.date_end = end_str if range_end_ts else None
+            range_args.auto_split = False  # Prevent recursive splitting
+            range_args.auto_smart = False  # Prevent recursive smart splitting
+            
+            # Scrape this range (multi-threading happens only within this range)
+            try:
+                handle_scrape_single_range(range_args, range_start_ts, range_end_ts)
+                print(f"Completed range {i+1}/{len(safe_ranges)}")
+            except Exception as e:
+                print(f"Error processing range {start_str} to {end_str}: {e}")
+                continue
         
-        print(f"\n=== Processing range {i+1}/{len(safe_ranges)}: {start_str} to {end_str} ===")
+        print(f"\n=== Smart auto-split scraping complete ===")
+        print(f"Processed {len(safe_ranges)} optimized ranges")
         
-        # Check entry count for this specific range before scraping
-        range_entries = get_total_entries(args.appid, range_start_ts, range_end_ts, args.required_tags, args.excluded_tags)
-        if range_entries is not None:
-            range_pages = math.ceil(range_entries / ITEMS_PER_PAGE)
-            print(f"Range has {range_entries:,} entries ({range_pages} pages)")
-        
-        # Create range-specific args
-        range_args = argparse.Namespace(**vars(args))
-        range_args.date_start = start_str if range_start_ts else None
-        range_args.date_end = end_str if range_end_ts else None
-        range_args.auto_split = False  # Prevent recursive splitting
-        range_args.auto_smart = False  # Prevent recursive smart splitting
-        
-        # Scrape this range (multi-threading happens only within this range)
-        try:
-            handle_scrape_single_range(range_args, range_start_ts, range_end_ts)
-            print(f"Completed range {i+1}/{len(safe_ranges)}")
-        except Exception as e:
-            print(f"Error processing range {start_str} to {end_str}: {e}")
-            continue
-    
-    print(f"\n=== Smart auto-split scraping complete ===")
-    print(f"Processed {len(safe_ranges)} optimized ranges")
+    except KeyboardInterrupt:
+        print(f"\n=== Smart auto-split scraping interrupted during scraping phase ===")
+        print(f"Completed {i}/{len(safe_ranges)} ranges before interruption.")
+        print("Progress has been saved for completed ranges.")
+        return
 
 def handle_scrape_single_range(args, date_start, date_end):
     """Handle scraping for a single date range without auto-splitting"""
@@ -604,9 +629,9 @@ def handle_scrape_single_range(args, date_start, date_end):
         end_page = MAX_SAFE_PAGES
 
     return scrape_pages_range(args, start_page, end_page, date_start, date_end, 
-                            seen_ids, stats, all_items, output_file, seen_ids_file, debug_log_file)
+                            seen_ids, stats, all_items, output_file, seen_ids_file, debug_log_file, total_entries)
 
-def scrape_pages_range(args, start_page, end_page, date_start, date_end, seen_ids, stats, all_items, output_file, seen_ids_file, debug_log_file):
+def scrape_pages_range(args, start_page, end_page, date_start, date_end, seen_ids, stats, all_items, output_file, seen_ids_file, debug_log_file, total_entries):
     """Scrape a specific range of pages with given filters"""
     
     print(f"Scraping Steam Workshop for App ID {args.appid} from page {start_page} to {end_page}")
@@ -632,6 +657,18 @@ def scrape_pages_range(args, start_page, end_page, date_start, date_end, seen_id
     # Thread-safe locks for shared data
     seen_ids_lock = threading.Lock()
     stats_lock = threading.Lock()
+    
+    # Track pages with item count discrepancies
+    page_discrepancies = []  # List of (page_num, found_items, missing_count)
+    discrepancy_lock = threading.Lock()
+    
+    def track_page_discrepancy(page_num, found_items):
+        """Thread-safe tracking of page discrepancies"""
+        # Only track as discrepancy if it's not the final page (which is expected to be short)
+        if found_items != ITEMS_PER_PAGE and found_items > 0 and page_num != end_page:
+            missing_count = ITEMS_PER_PAGE - found_items
+            with discrepancy_lock:
+                page_discrepancies.append((page_num, found_items, missing_count))
     
     try:
         # Create progress bar
@@ -671,6 +708,11 @@ def scrape_pages_range(args, start_page, end_page, date_start, date_end, seen_id
                                 response.text, page_num, seen_ids_lock, seen_ids, stats_lock, stats
                             )
                             
+                            # Track page discrepancies by checking actual items on page
+                            soup = BeautifulSoup(response.text, "html.parser")
+                            actual_items_on_page = len(soup.find_all("a", class_="item_link"))
+                            track_page_discrepancy(page_num, actual_items_on_page)
+                            
                             if new_items:
                                 batch_items.extend(new_items)
                                 
@@ -678,8 +720,6 @@ def scrape_pages_range(args, start_page, end_page, date_start, date_end, seen_id
                                 if args.end_page is None and not args.force and len(new_items) < ITEMS_PER_PAGE:
                                     tqdm.write(f"Page {page_num}: Fewer than 30 items found. Marking for early termination.")
                                     early_termination = True
-                            else:
-                                tqdm.write(f"No new items found on page {page_num}")
                             
                             # Update progress bar
                             pbar.update(1)
@@ -717,13 +757,64 @@ def scrape_pages_range(args, start_page, end_page, date_start, date_end, seen_id
             final_seen_ids = load_seen_ids_from_output(output_file, args.format)
             save_seen_ids(seen_ids_file, final_seen_ids)
         else:
-            print("No new items found to save.")
+            print("Info: No new items found to save.")
 
         print("\n==== Summary ====")
         print(f"Pages processed: {total_pages}")
         print(f"Total items found: {stats['total_found']}")
         print(f"New items added: {stats['added']}")
         print(f"Previously seen items skipped: {stats['skipped']}")
+        
+        # Analyze page discrepancies
+        total_missing_from_pages = 0
+        pages_with_discrepancies = 0
+        
+        if page_discrepancies:
+            pages_with_discrepancies = len(page_discrepancies)
+            total_missing_from_pages = sum(missing for _, _, missing in page_discrepancies)
+            
+            print(f"\nUnexpected page discrepancies detected:")
+            print(f"  Pages with fewer than {ITEMS_PER_PAGE} items (excluding final page): {pages_with_discrepancies}")
+            print(f"  Total items missing from these pages: {total_missing_from_pages}")
+            
+            # Show a few examples
+            if len(page_discrepancies) <= 5:
+                for page_num, found, missing in page_discrepancies:
+                    print(f"    Page {page_num}: {found} items (missing {missing})")
+            else:
+                for page_num, found, missing in page_discrepancies[:3]:
+                    print(f"    Page {page_num}: {found} items (missing {missing})")
+                print(f"    ... and {len(page_discrepancies) - 3} more pages")
+        
+        # Check for discrepancies between expected and actual items
+        expected_total = total_entries
+        actual_total = stats['total_found']
+        
+        if expected_total != actual_total:
+            missing_items = expected_total - actual_total
+            discrepancy_percent = (missing_items / expected_total) * 100 if expected_total > 0 else 0
+            print(f"\nDISCREPANCY DETECTED: Expected {expected_total:,} total items but found {actual_total:,} (missing {missing_items}, {discrepancy_percent:.3f}%)")
+            
+            # Compare with page-level missing items
+            if total_missing_from_pages > 0:
+                if missing_items == total_missing_from_pages:
+                    print(f"✓ All missing items ({missing_items}) accounted for by unexpected short pages")
+                elif missing_items > total_missing_from_pages:
+                    additional_missing = missing_items - total_missing_from_pages
+                    print(f"  {total_missing_from_pages} items missing due to unexpected short pages")
+                    print(f"  {additional_missing} additional items missing (likely due to concurrent activity or expected final page shortness)")
+                else:
+                    print(f"  Note: Unexpected page discrepancies ({total_missing_from_pages}) exceed total missing ({missing_items})")
+                    print(f"        This suggests the final page's expected shortness accounts for some of the difference")
+            
+            print("\nMost likely causes:")
+            print("  - Items being removed/deleted during scraping window")
+            print("  - Items moved between pages due to concurrent Steam activity") 
+            print("  - Steam pagination inconsistencies/bugs")
+            print("Note: This is a known limitation of scraping live, dynamic content.")
+        else:
+            print(f"\n✓ Perfect item count: Found all {actual_total:,} expected items")
+        
         print(f"Output saved to: {output_file}")
         print(f"Seen ID list: {seen_ids_file}")
         print(f"Debug URL log: {debug_log_file}")
@@ -791,7 +882,21 @@ def auto_split_by_entries(app_id, date_start=None, date_end=None, required_tags=
     if total_entries <= max_entries:
         start_str = timestamp_to_date(date_start) if date_start else "beginning"
         end_str = timestamp_to_date(date_end) if date_end else "end"
-        print(f"Range {start_str} to {end_str}: {total_entries:,} entries (within limit, level: {split_level})")
+        # Determine the appropriate level description for the safe range
+        if split_level == "initial":
+            level_desc = "no splitting needed"
+        elif split_level == "year":
+            level_desc = "year-level range"
+        elif split_level == "month":
+            level_desc = "month-level range" 
+        elif split_level == "week":
+            level_desc = "week-level range"
+        elif split_level == "day":
+            level_desc = "day-level range"
+        else:
+            level_desc = f"level: {split_level}"
+        
+        print(f"Range {start_str} to {end_str}: {total_entries:,} entries (within limit, {level_desc})")
         return [(date_start, date_end)]
     
     # Range exceeds limit, need to split
@@ -799,14 +904,22 @@ def auto_split_by_entries(app_id, date_start=None, date_end=None, required_tags=
     end_str = timestamp_to_date(date_end) if date_end else "end"
     print(f"Range {start_str} to {end_str}: {total_entries:,} entries exceeds limit. Splitting at {split_level} level...")
     
-    # Handle initial case (no date range specified)
-    if split_level == "initial" and (date_start is None or date_end is None):
+    # Handle initial case (no date range specified at all)
+    if split_level == "initial" and date_start is None and date_end is None:
         print("No date range specified. Using Steam Workshop launch date as starting point.")
         # Start from Steam Workshop launch date
         start_date = datetime(2011, 10, 13)  # Steam Workshop launch date
         end_date = datetime.now()  # Current date
         date_start = int(start_date.timestamp())
         date_end = int(end_date.timestamp())
+        # Continue with year-level splitting
+        split_level = "year"
+    elif split_level == "initial":
+        # Partial date range specified - handle missing end date
+        if date_end is None:
+            print("End date not specified. Using current date as end point.")
+            end_date = datetime.now()
+            date_end = int(end_date.timestamp())
         # Continue with year-level splitting
         split_level = "year"
     
@@ -846,16 +959,28 @@ def split_by_years(app_id, date_start, date_end, required_tags, excluded_tags, m
         
         print(f"Checking year {current_year}: {actual_start.strftime('%Y-%m-%d')} to {actual_end.strftime('%Y-%m-%d')}")
         
-        # Recursively check this year
-        year_ranges = auto_split_by_entries(app_id, year_start_ts, year_end_ts, 
-                                          required_tags, excluded_tags, max_entries, "month")
+        # Check entries for this year first
+        year_entries = get_total_entries(app_id, year_start_ts, year_end_ts, required_tags, excluded_tags)
         
-        if year_ranges is None:
-            print(f"Error processing year {current_year}, skipping...")
-        elif len(year_ranges) == 0:
+        if year_entries is None:
+            print(f"Error getting entries for year {current_year}, skipping...")
+        elif year_entries == 0:
             print(f"No entries in year {current_year}")
+        elif year_entries <= max_entries:
+            print(f"Year {current_year}: {year_entries:,} entries (within limit, year-level range)")
+            safe_ranges.append((year_start_ts, year_end_ts))
         else:
-            safe_ranges.extend(year_ranges)
+            print(f"Year {current_year}: {year_entries:,} entries exceeds limit. Splitting into months...")
+            # Only recursively split if year exceeds limits
+            year_ranges = auto_split_by_entries(app_id, year_start_ts, year_end_ts, 
+                                              required_tags, excluded_tags, max_entries, "month")
+            
+            if year_ranges is None:
+                print(f"Error processing year {current_year}, skipping...")
+            elif len(year_ranges) == 0:
+                print(f"No entries found when splitting year {current_year}")
+            else:
+                safe_ranges.extend(year_ranges)
         
         current_year += 1
     
@@ -884,16 +1009,28 @@ def split_by_months(app_id, date_start, date_end, required_tags, excluded_tags, 
         
         print(f"Checking month {current.strftime('%Y-%m')}: {actual_start.strftime('%Y-%m-%d')} to {actual_end.strftime('%Y-%m-%d')}")
         
-        # Recursively check this month
-        month_ranges = auto_split_by_entries(app_id, month_start_ts, month_end_ts,
-                                           required_tags, excluded_tags, max_entries, "week")
+        # Check entries for this month first
+        month_entries = get_total_entries(app_id, month_start_ts, month_end_ts, required_tags, excluded_tags)
         
-        if month_ranges is None:
-            print(f"Error processing month {current.strftime('%Y-%m')}, skipping...")
-        elif len(month_ranges) == 0:
+        if month_entries is None:
+            print(f"Error getting entries for month {current.strftime('%Y-%m')}, skipping...")
+        elif month_entries == 0:
             print(f"No entries in month {current.strftime('%Y-%m')}")
+        elif month_entries <= max_entries:
+            print(f"Month {current.strftime('%Y-%m')}: {month_entries:,} entries (within limit, month-level range)")
+            safe_ranges.append((month_start_ts, month_end_ts))
         else:
-            safe_ranges.extend(month_ranges)
+            print(f"Month {current.strftime('%Y-%m')}: {month_entries:,} entries exceeds limit. Splitting into weeks...")
+            # Only recursively split if month exceeds limits
+            month_ranges = auto_split_by_entries(app_id, month_start_ts, month_end_ts,
+                                               required_tags, excluded_tags, max_entries, "week")
+            
+            if month_ranges is None:
+                print(f"Error processing month {current.strftime('%Y-%m')}, skipping...")
+            elif len(month_ranges) == 0:
+                print(f"No entries found when splitting month {current.strftime('%Y-%m')}")
+            else:
+                safe_ranges.extend(month_ranges)
         
         # Move to next month
         if current.month == 12:
@@ -929,16 +1066,28 @@ def split_by_weeks(app_id, date_start, date_end, required_tags, excluded_tags, m
         
         print(f"Checking week {actual_start.strftime('%Y-%m-%d')} to {actual_end.strftime('%Y-%m-%d')}")
         
-        # Recursively check this week
-        week_ranges = auto_split_by_entries(app_id, week_start_ts, week_end_ts,
-                                          required_tags, excluded_tags, max_entries, "day")
+        # Check entries for this week first
+        week_entries = get_total_entries(app_id, week_start_ts, week_end_ts, required_tags, excluded_tags)
         
-        if week_ranges is None:
-            print(f"Error processing week starting {actual_start.strftime('%Y-%m-%d')}, skipping...")
-        elif len(week_ranges) == 0:
+        if week_entries is None:
+            print(f"Error getting entries for week starting {actual_start.strftime('%Y-%m-%d')}, skipping...")
+        elif week_entries == 0:
             print(f"No entries in week starting {actual_start.strftime('%Y-%m-%d')}")
+        elif week_entries <= max_entries:
+            print(f"Week {actual_start.strftime('%Y-%m-%d')} to {actual_end.strftime('%Y-%m-%d')}: {week_entries:,} entries (within limit, week-level range)")
+            safe_ranges.append((week_start_ts, week_end_ts))
         else:
-            safe_ranges.extend(week_ranges)
+            print(f"Week {actual_start.strftime('%Y-%m-%d')} to {actual_end.strftime('%Y-%m-%d')}: {week_entries:,} entries exceeds limit. Splitting into days...")
+            # Only recursively split if week exceeds limits
+            week_ranges = auto_split_by_entries(app_id, week_start_ts, week_end_ts,
+                                              required_tags, excluded_tags, max_entries, "day")
+            
+            if week_ranges is None:
+                print(f"Error processing week starting {actual_start.strftime('%Y-%m-%d')}, skipping...")
+            elif len(week_ranges) == 0:
+                print(f"No entries found when splitting week starting {actual_start.strftime('%Y-%m-%d')}")
+            else:
+                safe_ranges.extend(week_ranges)
         
         # Move to next week
         current = week_end + timedelta(days=1)
