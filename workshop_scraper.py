@@ -480,7 +480,8 @@ def handle_smart_auto_split_scrape(args, date_start, date_end):
     """Handle smart auto-split scraping by checking entry counts and recursively splitting"""
     print("Smart auto-split mode enabled. Analyzing entry counts to determine optimal splitting...")
     
-    # Get safe ranges using the intelligent splitting
+    # PHASE 1: Analyze and determine all safe ranges (NO multi-threading here)
+    print("Phase 1: Analyzing entries and determining safe filter ranges...")
     safe_ranges = auto_split_by_entries(args.appid, date_start, date_end, args.required_tags, args.excluded_tags)
     
     if safe_ranges is None:
@@ -491,8 +492,10 @@ def handle_smart_auto_split_scrape(args, date_start, date_end):
         print("No entries found for the given filters.")
         return
     
-    print(f"Split into {len(safe_ranges)} safe range(s) for scraping")
+    print(f"Phase 1 complete: Split into {len(safe_ranges)} safe range(s) for scraping")
     
+    # PHASE 2: Scrape each range sequentially (multi-threading only within each range)
+    print("Phase 2: Sequential scraping with per-range multi-threading...")
     total_stats = {'total_found': 0, 'added': 0, 'skipped': 0}
     
     for i, (range_start_ts, range_end_ts) in enumerate(safe_ranges):
@@ -501,6 +504,12 @@ def handle_smart_auto_split_scrape(args, date_start, date_end):
         
         print(f"\n=== Processing range {i+1}/{len(safe_ranges)}: {start_str} to {end_str} ===")
         
+        # Check entry count for this specific range before scraping
+        range_entries = get_total_entries(args.appid, range_start_ts, range_end_ts, args.required_tags, args.excluded_tags)
+        if range_entries is not None:
+            range_pages = math.ceil(range_entries / ITEMS_PER_PAGE)
+            print(f"Range has {range_entries:,} entries ({range_pages} pages)")
+        
         # Create range-specific args
         range_args = argparse.Namespace(**vars(args))
         range_args.date_start = start_str if range_start_ts else None
@@ -508,7 +517,7 @@ def handle_smart_auto_split_scrape(args, date_start, date_end):
         range_args.auto_split = False  # Prevent recursive splitting
         range_args.auto_smart = False  # Prevent recursive smart splitting
         
-        # Scrape this range
+        # Scrape this range (multi-threading happens only within this range)
         try:
             handle_scrape_single_range(range_args, range_start_ts, range_end_ts)
             print(f"Completed range {i+1}/{len(safe_ranges)}")
@@ -524,6 +533,20 @@ def handle_scrape_single_range(args, date_start, date_end):
     output_file = f"{args.output}.{args.format}"
     seen_ids_file = f"{args.output}_seen_ids.txt"
     debug_log_file = f"{args.output}_debug_urls.txt"
+
+    # FIRST: Check entry count before any processing (no multi-threading)
+    print("Checking entry count for this filter combination...")
+    total_entries = get_total_entries(args.appid, date_start, date_end, args.required_tags, args.excluded_tags)
+    
+    if total_entries is None:
+        print("Unable to determine entry count. Exiting.")
+        return
+    
+    if total_entries == 0:
+        print("No entries found for this filter combination.")
+        return
+    
+    print(f"Found {total_entries:,} total entries for this filter combination")
 
     # Load seen IDs from output file (primary source of truth)
     output_seen_ids = load_seen_ids_from_output(output_file, args.format)
@@ -563,9 +586,12 @@ def handle_scrape_single_range(args, date_start, date_end):
     stats = {'total_found': 0, 'added': 0, 'skipped': 0}
     all_items = []
 
-    # Determine range
+    # Determine page range based on entry count
     start_page = args.start_page
-    end_page = args.end_page or get_max_page(args.appid, date_start, date_end, args.required_tags, args.excluded_tags)
+    max_page = math.ceil(total_entries / ITEMS_PER_PAGE)
+    end_page = args.end_page or max_page
+
+    print(f"Calculated max page: {max_page} (based on {total_entries:,} total entries)")
 
     if end_page is None:
         print("Unable to determine the end page. Exiting.")
@@ -746,10 +772,13 @@ def auto_split_by_entries(app_id, date_start=None, date_end=None, required_tags=
     """
     Automatically split date ranges using structured hierarchy: year → month → week → day
     
+    This function ONLY analyzes entry counts and determines safe date ranges.
+    NO multi-threading occurs here - this is pure analysis phase.
+    
     Args:
         split_level: "initial", "year", "month", "week", or "day"
     """
-    # Check total entries for this range
+    # Check total entries for this range (single request, no threading)
     total_entries = get_total_entries(app_id, date_start, date_end, required_tags, excluded_tags)
     
     if total_entries is None:
