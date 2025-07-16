@@ -21,7 +21,22 @@ def load_records():
     
     try:
         with open(records_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            records_data = json.load(f)
+        
+        # Handle both old format (array) and new format (object with app_id keys)
+        if isinstance(records_data, list):
+            # Old format - return as-is for backward compatibility
+            return records_data
+        else:
+            # New format - flatten all records from all app IDs and add app_id back
+            all_records = []
+            for app_id, app_records in records_data.items():
+                for record in app_records:
+                    # Add app_id back to the record for backward compatibility
+                    record_with_app_id = record.copy()
+                    record_with_app_id['app_id'] = int(app_id) if app_id.isdigit() else app_id
+                    all_records.append(record_with_app_id)
+            return all_records
     except (json.JSONDecodeError, IOError) as e:
         print(f"Error loading records: {e}")
         return []
@@ -184,11 +199,22 @@ def cleanup_records(records):
             removed_count += 1
     
     if removed_count > 0:
-        # Save cleaned records
+        # Convert back to new format (grouped by app_id) for saving
         records_file = "./ugc/download_records.json"
         try:
+            grouped_records = {}
+            for record in existing_records:
+                app_id = str(record.get('app_id', 'unknown'))
+                if app_id not in grouped_records:
+                    grouped_records[app_id] = []
+                
+                # Remove app_id from the record since it's now in the parent key
+                cleaned_record = record.copy()
+                cleaned_record.pop('app_id', None)
+                grouped_records[app_id].append(cleaned_record)
+            
             with open(records_file, 'w', encoding='utf-8') as f:
-                json.dump(existing_records, f, indent=2, ensure_ascii=False)
+                json.dump(grouped_records, f, indent=2, ensure_ascii=False)
             print(f"Cleaned up {removed_count} records for missing files.")
         except IOError as e:
             print(f"Error saving cleaned records: {e}")

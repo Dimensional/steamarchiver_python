@@ -168,26 +168,32 @@ def record_ugc_download(workshop_id, file_url, title, dest_path, app_id, status,
     
     # Load existing records
     records_file = "./ugc/download_records.json"
-    records = []
+    records = {}
     
     if path.exists(records_file):
         try:
             with open(records_file, 'r', encoding='utf-8') as f:
                 records = json.load(f)
         except (json.JSONDecodeError, IOError):
-            records = []
+            records = {}
+    
+    # Ensure app_id is a string for consistent JSON keys
+    app_id_str = str(app_id) if app_id is not None else "unknown"
+    
+    # Initialize app_id array if it doesn't exist
+    if app_id_str not in records:
+        records[app_id_str] = []
     
     # Check if record already exists
     existing_record = None
-    for i, record in enumerate(records):
+    for i, record in enumerate(records[app_id_str]):
         if record.get('workshop_id') == workshop_id:
             existing_record = i
             break
     
-    # Create new record
+    # Create new record (without app_id since it's in the parent key)
     record = {
         'workshop_id': workshop_id,
-        'app_id': app_id,
         'title': title,
         'file_url': file_url,
         'file_path': dest_path,
@@ -199,9 +205,9 @@ def record_ugc_download(workshop_id, file_url, title, dest_path, app_id, status,
     
     # Update or add record
     if existing_record is not None:
-        records[existing_record] = record
+        records[app_id_str][existing_record] = record
     else:
-        records.append(record)
+        records[app_id_str].append(record)
     
     # Save records
     try:

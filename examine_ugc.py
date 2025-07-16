@@ -26,10 +26,15 @@ def get_ugc_info_from_records(ugc_path):
         # Normalize the path for comparison
         ugc_path_normalized = os.path.normpath(ugc_path)
         
-        for record in records:
-            record_path = os.path.normpath(record.get('file_path', ''))
-            if record_path == ugc_path_normalized:
-                return record
+        # Search through all app IDs
+        for app_id, app_records in records.items():
+            for record in app_records:
+                record_path = os.path.normpath(record.get('file_path', ''))
+                if record_path == ugc_path_normalized:
+                    # Add the app_id back to the record for backward compatibility
+                    record_with_app_id = record.copy()
+                    record_with_app_id['app_id'] = int(app_id) if app_id.isdigit() else app_id
+                    return record_with_app_id
     except Exception as e:
         print(f"Warning: Could not read download records: {e}")
     
