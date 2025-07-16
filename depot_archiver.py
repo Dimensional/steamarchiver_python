@@ -79,13 +79,150 @@ def read_workshop_file(workshop_file):
     
     return workshop_ids
 
+async def download_ugc_file(session, url, dest_path, file_size=None):
+    """Download a UGC file from the given URL"""
+    try:
+        async with session.get(url) as response:
+            if not response.ok:
+                print(f"Failed to download UGC file: HTTP {response.status}")
+                return False
+            
+            # Get content length if not provided
+            if file_size is None:
+                file_size = response.headers.get('content-length')
+                if file_size:
+                    file_size = int(file_size)
+            
+            # Download with progress indication
+            downloaded = 0
+            with open(dest_path, 'wb') as f:
+                async for chunk in response.content.iter_chunked(8192):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if file_size:
+                        progress = (downloaded / file_size) * 100
+                        print(f"\rDownloading: {progress:.1f}% ({downloaded:,}/{file_size:,} bytes)", end='')
+            
+            print(f"\nDownloaded UGC file to {dest_path}")
+            return True
+    except Exception as e:
+        print(f"Error downloading UGC file: {e}")
+        return False
+
+async def archive_ugc_workshop_item(workshop_id, file_url, title, file_size=None, app_id=None):
+    """Archive a UGC workshop item"""
+    # Create UGC directory structure organized by app ID
+    if app_id:
+        ugc_dir = f"./ugc/{app_id}"
+    else:
+        ugc_dir = f"./ugc/unknown"
+    makedirs(ugc_dir, exist_ok=True)
+
+    # Sanitize workshop title for filename use
+    safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+    safe_title = safe_title.replace(' ', '_')
+    # Save file with both workshop ID and sanitized title in the filename
+    dest_path = path.join(ugc_dir, f"{workshop_id}_{safe_title}")
+
+    # Check if file already exists
+    if path.exists(dest_path):
+        print(f"UGC file already exists: {dest_path}")
+        # Analyze existing file
+        analysis = analyze_file(dest_path)
+        print(f"Existing file format: {analysis.get('format', 'unknown')}")
+        # Update tracking record even if file exists
+        record_ugc_download(workshop_id, file_url, title, dest_path, app_id, "exists")
+        return True
+
+    print(f"Downloading UGC workshop item {workshop_id}: '{title}'")
+    print(f"URL: {file_url}")
+
+    async with ClientSession() as session:
+        success = await download_ugc_file(session, file_url, dest_path, file_size)
+
+        if success:
+            # Analyze downloaded file
+            analysis = analyze_file(dest_path)
+            print(f"Downloaded file format: {analysis.get('format', 'unknown')}")
+            if analysis.get('is_compressed'):
+                print(f"File is compressed: {analysis.get('compression', 'unknown')}")
+            if analysis.get('is_archive'):
+                print(f"File is an archive containing multiple files")
+
+            # Record the download
+            record_ugc_download(workshop_id, file_url, title, dest_path, app_id, "downloaded", analysis.get('format', 'unknown'))
+
+        return success
+
+def detect_file_format(filepath):
+    """Detect file format based on header bytes (legacy compatibility)"""
+    return detect_format(filepath)
+
+def record_ugc_download(workshop_id, file_url, title, dest_path, app_id, status, file_format=None):
+    """Record UGC download information to a tracking file"""
+    import json
+    from datetime import datetime
+    
+    # Create ugc directory if it doesn't exist
+    makedirs("./ugc", exist_ok=True)
+    
+    # Load existing records
+    records_file = "./ugc/download_records.json"
+    records = []
+    
+    if path.exists(records_file):
+        try:
+            with open(records_file, 'r', encoding='utf-8') as f:
+                records = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            records = []
+    
+    # Check if record already exists
+    existing_record = None
+    for i, record in enumerate(records):
+        if record.get('workshop_id') == workshop_id:
+            existing_record = i
+            break
+    
+    # Create new record
+    record = {
+        'workshop_id': workshop_id,
+        'app_id': app_id,
+        'title': title,
+        'file_url': file_url,
+        'file_path': dest_path,
+        'status': status,
+        'file_format': file_format,
+        'timestamp': datetime.now().isoformat(),
+        'file_size': path.getsize(dest_path) if path.exists(dest_path) else None
+    }
+    
+    # Update or add record
+    if existing_record is not None:
+        records[existing_record] = record
+    else:
+        records.append(record)
+    
+    # Save records
+    try:
+        with open(records_file, 'w', encoding='utf-8') as f:
+            json.dump(records, f, indent=2, ensure_ascii=False)
+    except IOError as e:
+        print(f"Warning: Could not save UGC download record: {e}")
+
 if __name__ == "__main__": # exit before we import our shit if the args are wrong
     parser = ArgumentParser(description='Download Steam content depots for archival. Downloading apps: Specify an app to download all the depots for that app, or an app and depot ID to download the latest version of that depot (or a specific version if the manifest ID is specified.) Downloading workshop items: Use the -w flag to specify the ID of the workshop file to download. Exit code is 0 if all downloads succeeded, or the number of failures if at least one failed.')
     dl_group = parser.add_mutually_exclusive_group()
     log_group = parser.add_mutually_exclusive_group()
     server_group = parser.add_mutually_exclusive_group()
     dl_group.add_argument("-a", type=int, metavar=("appid","depotid"), action=AppDepotAction, nargs='+', help="App, depot, and manifest ID to download. If the manifest ID is omitted, the lastest manifest specified by the public branch will be downloaded.\nIf the depot ID is omitted, all depots specified by the public branch will be downloaded.")
-    dl_group.add_argument("-w", type=str, action='append', help="Workshop file ID(s) to download. Can specify multiple times or comma-separated values.", dest="workshop_ids")
+    dl_group.add_argument(
+        "-w",
+        type=str,
+        action='append',
+        help="Workshop file ID(s) to download. You can specify multiple -w options (e.g. -w 123 -w 456), or provide a comma-separated list in quotes (e.g. -w \"123,456\").",
+        dest="workshop_ids"
+    )
     dl_group.add_argument("-csv", type=str, help="Path to CSV file containing appId, DepotID, ManifestID, and Branch name.", dest="csv_file")
     dl_group.add_argument("-wf", "--workshop-file", type=str, help="Path to JSON or CSV file containing workshop IDs generated by workshop_scraper.", dest="workshop_file")
     parser.add_argument("-r", type=str, nargs='?', help="Branch Name.", dest="branch", action=BranchAction)
@@ -192,6 +329,9 @@ from aiohttp import ClientSession
 from login import auto_login
 from chunkstore import Chunkstore
 from migration import migration_needed, migrate
+from format_detection import detect_file_format as detect_format, analyze_file
+import urllib.parse
+import struct
 
 def save_manifest_to_json(manifest, output_dir, workshop_id=None, workshop_name=None):
     debug_dir = path.join(output_dir, "debug")
@@ -361,15 +501,27 @@ def archive_manifest(manifest, c, name="unknown", dry_run=False, server_override
     try:
         run(run_workers(download_state))
     except KeyboardInterrupt:
-        print("\n\033[31mDownload interrupted by user.\033[0m")
-        exit(1)
+        print(f"\n\033[31mChunk download interrupted by user.\033[0m")
+        print(f"Downloaded {download_state.chunks_dled} chunks and skipped {download_state.chunks_skipped} chunks before interruption.")
+        if backup and chunkstore:
+            print("Writing partial CSM and closing chunkstore...")
+            try:
+                chunkstore.write_csm()
+                chunkstore.close()
+            except Exception as e:
+                print(f"Warning: Error closing chunkstore: {e}")
+        return False
     except Exception as e:
-        print(f"\n\033[31mAn error occurred: {e}\033[0m")
+        print(f"\n\033[31mAn error occurred during chunk download: {e}\033[0m")
+        return False
     finally:
-        if backup:
+        if backup and chunkstore:
             print("Writing CSM and closing chunkstore...")
-            chunkstore.write_csm()
-            chunkstore.close()
+            try:
+                chunkstore.write_csm()
+                chunkstore.close()
+            except Exception as e:
+                print(f"Warning: Error closing chunkstore: {e}")
     print("\nFinished downloading", manifest.depot_id, "(%s)" % (name), "gid", manifest.gid, "from", datetime.fromtimestamp(manifest.creation_time))
     print("Downloaded %s %s and skipped %s" % (download_state.chunks_dled, "chunk" if download_state.chunks_dled == 1 else "chunks", download_state.chunks_skipped))
     return True
@@ -583,130 +735,144 @@ if __name__ == "__main__":
 
     if args.workshop_ids:
         exit_status = 0
-        for workshop_id in args.workshop_ids:
-            response = steam_client.send_um_and_wait("PublishedFile.GetDetails#1", {'publishedfileids':[workshop_id]})
-            if response.header.eresult != EResult.OK:
-                print(f"\033[31merror: couldn't get workshop item info for {workshop_id}:\033[0m", response.header.error_message)
-                exit_status += 1
-                continue
-            file = response.body.publishedfiledetails[0]
-            if file.result != EResult.OK:
-                print(f"\033[31merror: steam returned error for workshop item {workshop_id}:\033[0m", EResult(file.result))
-                exit_status += 1
-                continue
-            print(f"Retrieved data for workshop item {workshop_id}: '{file.title}' for app {file.consumer_appid} ({file.app_name})")
-            if not file.hcontent_file:
-                print(f"\033[31merror: workshop item {workshop_id} is not on SteamPipe\033[0m")
-                exit_status += 1
-                continue
-            if file.file_url:
-                print(f"\033[31merror: workshop item {workshop_id} is not on SteamPipe: its download URL is\033[0m", file.file_url)
-                exit_status += 1
-                continue
-            success = archive_manifest(try_load_manifest(file.consumer_appid, file.consumer_appid, file.hcontent_file, workshop_id=workshop_id, workshop_name=file.title), c, file.title, args.dry_run, args.server, args.backup, workshop_id, file.title)
-            exit_status += (0 if success else 1)
+        try:
+            for workshop_id in args.workshop_ids:
+                response = steam_client.send_um_and_wait("PublishedFile.GetDetails#1", {'publishedfileids':[workshop_id]})
+                if response.header.eresult != EResult.OK:
+                    print(f"\033[31merror: couldn't get workshop item info for {workshop_id}:\033[0m", response.header.error_message)
+                    exit_status += 1
+                    continue
+                file = response.body.publishedfiledetails[0]
+                if file.result != EResult.OK:
+                    print(f"\033[31merror: steam returned error for workshop item {workshop_id}:\033[0m", EResult(file.result))
+                    exit_status += 1
+                    continue
+                print(f"Retrieved data for workshop item {workshop_id}: '{file.title}' for app {file.consumer_appid} ({file.app_name})")
+                if not file.hcontent_file:
+                    print(f"\033[31merror: workshop item {workshop_id} is not on SteamPipe\033[0m")
+                    exit_status += 1
+                    continue
+                if file.file_url:
+                    print(f"Found UGC item {workshop_id}: '{file.title}' for app {file.consumer_appid}")
+                    print(f"Downloading UGC file from: {file.file_url}")
+                    # Run the async function in a new event loop
+                    import asyncio
+                    success = asyncio.run(archive_ugc_workshop_item(workshop_id, file.file_url, file.title, file.file_size, file.consumer_appid))
+                    exit_status += (0 if success else 1)
+                    continue
+                success = archive_manifest(try_load_manifest(file.consumer_appid, file.consumer_appid, file.hcontent_file, workshop_id=workshop_id, workshop_name=file.title), c, file.title, args.dry_run, args.server, args.backup, workshop_id, file.title)
+                exit_status += (0 if success else 1)
+        except KeyboardInterrupt:
+            print(f"\n\033[31mWorkshop processing interrupted by user.\033[0m")
+            print(f"Processed workshop items with {exit_status} error(s) before interruption.")
+            exit(1)
         exit(exit_status)
 
     # Iterate over all the downloads we want
     exit_status = 0
-    for entry in args.app_depot:
-        appid = entry['appid']
-        depotid = entry['depotid']
-        manifestid = entry['manifestid']
-        branch = entry['branch']
+    try:
+        for entry in args.app_depot:
+            appid = entry['appid']
+            depotid = entry['depotid']
+            manifestid = entry['manifestid']
+            branch = entry['branch']
 
-        # Fetch appinfo
-        if args.local_appinfo:
-            highest_changenumber = 0
-            for file in listdir("./appinfo/"):
-                if not file.endswith(".vdf"): continue
-                if not file.startswith(str(appid) + "_"): continue
-                changenumber = int(file.split("_")[1].replace(".vdf", ""))
-                if changenumber > highest_changenumber:
-                    highest_changenumber = changenumber
-            if highest_changenumber == 0:
-                print("\033[31merror: -l flag specified, but no local appinfo exists for app\033[0m", appid)
-                exit(1)
-            appinfo_path = "./appinfo/%s_%s.vdf" % (appid, highest_changenumber)
-        else:
-            _LOG.info(f"Is the client logged in? {steam_client.logged_on}")
-            print("Fetching appinfo for", appid)
-            tokens = steam_client.get_access_tokens(app_ids=[appid])
-            msg = MsgProto(EMsg.ClientPICSProductInfoRequest)
-            body_app = msg.body.apps.add()
-            body_app.appid = appid
-            if 'apps' in tokens.keys() and appid in tokens['apps'].keys():
-                body_app.access_token = tokens['apps'][appid]
-            appinfo_response = steam_client.wait_event(steam_client.send_job(msg))[0].body.apps[0]
-            changenumber = appinfo_response.change_number
-            # Write vdf appinfo to disk
-            appinfo_path = "./appinfo/%s_%s.vdf" % (appid, changenumber)
-        need_to_write_appinfo = True
-        if path.exists(appinfo_path):
-            with open(appinfo_path, "r", encoding="utf-8") as f:
-                appinfo = loads(f.read())['appinfo']
-            if 'public_only' in appinfo.keys():
-                if appinfo['public_only'] == '1':
-                    print("Replacing public_only appinfo at:", appinfo_path)
-                    remove(appinfo_path)
-            else:
-                need_to_write_appinfo = False
-        if need_to_write_appinfo:
-            with open(appinfo_path, "wb") as f:
-                f.write(appinfo_response.buffer[:-1])
-            print("Saved appinfo for app", appid, "changenumber", changenumber)
-            # decode appinfo
-            appinfo = loads(appinfo_response.buffer[:-1].decode('utf-8', 'replace'))['appinfo']
-        if "public_only" in appinfo.keys():
-            print("WARNING: this app has additional (private) info. The archive "
-                    "may not work due to this info being missing. To get this "
-                    "info, run get_appinfo.py on this app using an account "
-                    "authorized to access it.")
-
-        if path.exists(path.join('./branches', f"{appid}_{branch}.key")):
-            with open(path.join('./branches', f"{appid}_{branch}.key"), "rb") as f:
-                branch_key = f.read()
-        if depotid:
-            if 'depots' in appinfo and str(depotid) in appinfo['depots'] and 'name' in appinfo['depots'][str(depotid)]:
-                name = appinfo['depots'][str(depotid)]['name']
-            else:
-                name = 'unknown'
-            if manifestid:
-                print("Archiving", appinfo['common']['name'], "depot", depotid, "manifest", manifestid)
-                exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, branch), c, name, args.dry_run, args.server, args.backup) else 1)
-            elif branch and (args.bpassword or branch_key):
-                try:
-                    if not branch_key:
-                        branch_key = beta_check_password(appid, args.bpassword, c)
-                    if args.encryptedbranch != '':
-                        encrypted_manifest = args.encryptedbranch
-                    else:
-                        encrypted_manifest = get_gid(appinfo['depots'][str(depotid)]['encryptedmanifests'][branch])
-                    manifestid = int.from_bytes(symmetric_decrypt_ecb(unhexlify(encrypted_manifest),branch_key[(appid, branch)]),byteorder='little')
-                    print("Archiving", appinfo['common']['name'], "depot", depotid, "branch", args.branch, "manifest", manifestid, "using key", branch_key)
-                    branch_key_path = "./branches"
-                    makedirs(path.dirname(branch_key_path), exist_ok=True)
-                    with open(path.join(branch_key_path, f"{appid}_{branch}.key"), "wb") as f:
-                        f.write(branch_key[(appid, branch)])
-                    # exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, args.branch, args.bpassword), c, name, args.dry_run, args.server, args.backup) else 1)
-                    exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, args.branch, branch_key[(appid, branch)]), c, name, args.dry_run, args.server, args.backup) else 1)
-                except SteamError as e:
-                    print(f"Error:", e)
+            # Fetch appinfo
+            if args.local_appinfo:
+                highest_changenumber = 0
+                for file in listdir("./appinfo/"):
+                    if not file.endswith(".vdf"): continue
+                    if not file.startswith(str(appid) + "_"): continue
+                    changenumber = int(file.split("_")[1].replace(".vdf", ""))
+                    if changenumber > highest_changenumber:
+                        highest_changenumber = changenumber
+                if highest_changenumber == 0:
+                    print("\033[31merror: -l flag specified, but no local appinfo exists for app\033[0m", appid)
                     exit(1)
+                appinfo_path = "./appinfo/%s_%s.vdf" % (appid, highest_changenumber)
             else:
-                manifest = get_gid(appinfo['depots'][str(depotid)]['manifests']['public'])
-                print("Archiving", appinfo['common']['name'], "depot", depotid, "manifest", manifest)
-                exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifest, args.branch), c, name, args.dry_run, args.server, args.backup) else 1)
-        else:
-            print("Archiving all latest depots for", appinfo['common']['name'], "build", appinfo['depots']['branches']['public']['buildid'])
-            for depot in appinfo["depots"]:
-                if isinstance(depot, int) or (isinstance(depot, str) and depot.isdigit()):
-                    get_depotkeys(appid, depot)
+                _LOG.info(f"Is the client logged in? {steam_client.logged_on}")
+                print("Fetching appinfo for", appid)
+                tokens = steam_client.get_access_tokens(app_ids=[appid])
+                msg = MsgProto(EMsg.ClientPICSProductInfoRequest)
+                body_app = msg.body.apps.add()
+                body_app.appid = appid
+                if 'apps' in tokens.keys() and appid in tokens['apps'].keys():
+                    body_app.access_token = tokens['apps'][appid]
+                appinfo_response = steam_client.wait_event(steam_client.send_job(msg))[0].body.apps[0]
+                changenumber = appinfo_response.change_number
+                # Write vdf appinfo to disk
+                appinfo_path = "./appinfo/%s_%s.vdf" % (appid, changenumber)
+            need_to_write_appinfo = True
+            if path.exists(appinfo_path):
+                with open(appinfo_path, "r", encoding="utf-8") as f:
+                    appinfo = loads(f.read())['appinfo']
+                if 'public_only' in appinfo.keys():
+                    if appinfo['public_only'] == '1':
+                        print("Replacing public_only appinfo at:", appinfo_path)
+                        remove(appinfo_path)
                 else:
-                    continue
-                depotinfo = appinfo["depots"][depot]
-                if not "manifests" in depotinfo or not "public" in depotinfo["manifests"]:
-                    continue
-                exit_status += (0 if archive_manifest(try_load_manifest(appid, depot, get_gid(depotinfo["manifests"]["public"])), c, depotinfo["name"] if "name" in depotinfo else "unknown", args.dry_run, args.server, args.backup) else 1)
+                    need_to_write_appinfo = False
+            if need_to_write_appinfo:
+                with open(appinfo_path, "wb") as f:
+                    f.write(appinfo_response.buffer[:-1])
+                print("Saved appinfo for app", appid, "changenumber", changenumber)
+                # decode appinfo
+                appinfo = loads(appinfo_response.buffer[:-1].decode('utf-8', 'replace'))['appinfo']
+            if "public_only" in appinfo.keys():
+                print("WARNING: this app has additional (private) info. The archive "
+                        "may not work due to this info being missing. To get this "
+                        "info, run get_appinfo.py on this app using an account "
+                        "authorized to access it.")
+
+            if path.exists(path.join('./branches', f"{appid}_{branch}.key")):
+                with open(path.join('./branches', f"{appid}_{branch}.key"), "rb") as f:
+                    branch_key = f.read()
+            if depotid:
+                if 'depots' in appinfo and str(depotid) in appinfo['depots'] and 'name' in appinfo['depots'][str(depotid)]:
+                    name = appinfo['depots'][str(depotid)]['name']
+                else:
+                    name = 'unknown'
+                if manifestid:
+                    print("Archiving", appinfo['common']['name'], "depot", depotid, "manifest", manifestid)
+                    exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, branch), c, name, args.dry_run, args.server, args.backup) else 1)
+                elif branch and (args.bpassword or branch_key):
+                    try:
+                        if not branch_key:
+                            branch_key = beta_check_password(appid, args.bpassword, c)
+                        if args.encryptedbranch != '':
+                            encrypted_manifest = args.encryptedbranch
+                        else:
+                            encrypted_manifest = get_gid(appinfo['depots'][str(depotid)]['encryptedmanifests'][branch])
+                        manifestid = int.from_bytes(symmetric_decrypt_ecb(unhexlify(encrypted_manifest),branch_key[(appid, branch)]),byteorder='little')
+                        print("Archiving", appinfo['common']['name'], "depot", depotid, "branch", args.branch, "manifest", manifestid, "using key", branch_key)
+                        branch_key_path = "./branches"
+                        makedirs(path.dirname(branch_key_path), exist_ok=True)
+                        with open(path.join(branch_key_path, f"{appid}_{branch}.key"), "wb") as f:
+                            f.write(branch_key[(appid, branch)])
+                        # exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, args.branch, args.bpassword), c, name, args.dry_run, args.server, args.backup) else 1)
+                        exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifestid, args.branch, branch_key[(appid, branch)]), c, name, args.dry_run, args.server, args.backup) else 1)
+                    except SteamError as e:
+                        print(f"Error:", e)
+                        exit(1)
+                else:
+                    manifest = get_gid(appinfo['depots'][str(depotid)]['manifests']['public'])
+                    print("Archiving", appinfo['common']['name'], "depot", depotid, "manifest", manifest)
+                    exit_status += (0 if archive_manifest(try_load_manifest(appid, depotid, manifest, args.branch), c, name, args.dry_run, args.server, args.backup) else 1)
+            else:
+                print("Archiving all latest depots for", appinfo['common']['name'], "build", appinfo['depots']['branches']['public']['buildid'])
+                for depot in appinfo["depots"]:
+                    if isinstance(depot, int) or (isinstance(depot, str) and depot.isdigit()):
+                        get_depotkeys(appid, depot)
+                    else:
+                        continue
+                    depotinfo = appinfo["depots"][depot]
+                    if not "manifests" in depotinfo or not "public" in depotinfo["manifests"]:
+                        continue
+                    exit_status += (0 if archive_manifest(try_load_manifest(appid, depot, get_gid(depotinfo["manifests"]["public"])), c, depotinfo["name"] if "name" in depotinfo else "unknown", args.dry_run, args.server, args.backup) else 1)
+    except KeyboardInterrupt:
+        print(f"\n\033[31mApp/depot processing interrupted by user.\033[0m")
+        print(f"Processed items with {exit_status} error(s) before interruption.")
+        exit(1)
     #steam_client.logout()
     exit(exit_status)
