@@ -10,13 +10,38 @@ from vdf import loads
 from chunkstore import Chunkstore
 from migration import migration_needed, migrate
 
+def parse_manifest_input(manifest_input):
+    """Parse manifest input to get filename and manifest ID"""
+    if manifest_input is None:
+        return None, None
+        
+    # Check if it's just a numeric manifest ID (backwards compatibility)
+    try:
+        manifest_id = int(manifest_input)
+        manifest_filename = f"{manifest_id}.manif5"
+        return manifest_filename, manifest_id
+    except (ValueError, TypeError):
+        # It's a filename - extract manifest ID from it
+        manifest_filename = f"{manifest_input}.manif5"
+        
+        # Try to extract manifest ID from filename
+        import re
+        numbers = re.findall(r'\d+', str(manifest_input))
+        if numbers:
+            # For workshop files, manifest ID is typically the last number
+            manifest_id = int(numbers[-1])
+        else:
+            raise ValueError(f"Could not extract manifest ID from filename: {manifest_input}")
+        
+        return manifest_filename, manifest_id
+
 if __name__ == "__main__":
     if migration_needed(): migrate()
     parser = ArgumentParser(description='Unpacks game data chunks from a SteamPipe retail master or game backup.')
     parser.add_argument("target", type=str, help="Path chunkstore to unpack.")
     parser.add_argument("-d", "--depot", type=int, help="Depot ID of the chunkstore.", default=None)
     parser.add_argument("-o", "--output", type=str, help="Output directory for unpacked chunks.", default="chunkstore")
-    parser.add_argument("--manifest", type=str, help="Path to the manifest file to use for unpacking.", default=None)
+    parser.add_argument("--manifest", type=str, help="Manifest filename (without .manif5 extension) or manifest ID to use for unpacking.", default=None)
     parser.add_argument("-t", "--threads", type=int, default=None, help="Number of threads to use for unpacking.")
     args = parser.parse_args()
     
@@ -30,9 +55,14 @@ if __name__ == "__main__":
         chunks = []
         if args.depot is None:
             args.depot = int(path.basename(args.target).split('_')[0])
-        manifest_file = path.join('depot', str(args.depot), 'manifest', args.manifest + ".manif5")
+            
+        # Parse manifest input to get filename and ID
+        manifest_filename, manifest_id = parse_manifest_input(args.manifest)
+        manifest_file = path.join('depot', str(args.depot), 'manifest', manifest_filename)
+        
         if not path.exists(manifest_file):
             print(f"Manifest file {manifest_file} not found.")
+            print(f"Parsed from input '{args.manifest}' -> filename: '{manifest_filename}', manifest ID: {manifest_id}")
             exit(1)
         with open(manifest_file, "rb") as f:
             manifest = DepotManifest(f.read())

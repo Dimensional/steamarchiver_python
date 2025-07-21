@@ -9,16 +9,38 @@ from chunkstore import Chunkstore
 from steam.core.manifest import DepotManifest
 from migration import migration_needed, migrate        
 
+def parse_manifest_input(manifest_input):
+    """Parse manifest input to get filename and manifest ID"""
+    # Check if it's just a numeric manifest ID (backwards compatibility)
+    try:
+        manifest_id = int(manifest_input)
+        manifest_filename = f"{manifest_id}.manif5"
+        return manifest_filename, manifest_id
+    except ValueError:
+        # It's a filename - extract manifest ID from it
+        manifest_filename = f"{manifest_input}.manif5"
+        
+        # Try to extract manifest ID from filename
+        import re
+        numbers = re.findall(r'\d+', manifest_input)
+        if numbers:
+            # For workshop files, manifest ID is typically the last number
+            manifest_id = int(numbers[-1])
+        else:
+            raise ValueError(f"Could not extract manifest ID from filename: {manifest_input}")
+        
+        return manifest_filename, manifest_id
+
 if __name__ == "__main__":
     if migration_needed(): migrate()
     parser = ArgumentParser(description='Pack a SteamPipe backup (.csd/.csm files, and optionally an sku.sis file defining the backup) from individual chunks in the depots/ folder.')
     parser.add_argument("-a", dest="appid", type=int, help="App ID for sku file (if ommitted, no sku will be generated)", nargs="?")
-    parser.add_argument("-d", dest="depots", metavar=('depot', 'manifest'), action="append", type=int, help="Depot ID to pack, can be used multiple times. Include a manifest ID too if generating an sku.sis", nargs='+')
+    parser.add_argument("-d", dest="depots", metavar=('depot', 'manifest'), action="append", type=str, help="Depot ID to pack, can be used multiple times. Include a manifest filename (without .manif5 extension) or manifest ID too if generating an sku.sis", nargs='+')
     parser.add_argument("-n", dest="name", default="steamarchiver backup", type=str, help="Backup name")
     parser.add_argument("--decrypted", action='store_true', help="Use decrypted chunks to pack backup", dest="decrypted")
     parser.add_argument("--no-update", action='store_true', help="If an existing backup is found, DELETE it instead of updating it", dest="no_update")
     parser.add_argument("--only-manifest", action='store_true', help="Only grab files listed in the manifest", dest="only_manifest")
-    parser.add_argument("--compare-manifests", type=int, help="Compare two manifests and only store files found in the new manifest", dest="compare_manifests", default=None)
+    parser.add_argument("--compare-manifests", type=str, help="Compare two manifests and only store files found in the new manifest (manifest filename without .manif5 extension or manifest ID)", dest="compare_manifests", default=None)
     parser.add_argument("--destdir", help="Directory to put sis/csm/csd files in", default=".")
     args = parser.parse_args()
     
@@ -78,6 +100,7 @@ if __name__ == "__main__":
         
         if len(depot_tuple) == 2:
             depot, manifest = depot_tuple
+            depot = int(depot)  # Convert depot to int
             depot_folder = join("depot", str(depot))
             chunkfolder = join(depot_folder, "chunk")
             chunks = []
@@ -87,9 +110,14 @@ if __name__ == "__main__":
                 depot_key_path = join("depot", str(depot), str(depot) + ".depotkey")
                 with open(depot_key_path, "rb") as key_file:
                     depot_key = key_file.read()
-                manifest_file = join(depot_folder, "manifest", str(manifest) + ".manif5")
+                    
+                # Parse manifest input to get filename and ID
+                manifest_filename, manifest_id = parse_manifest_input(manifest)
+                manifest_file = join(depot_folder, "manifest", manifest_filename)
+                
                 if not exists(manifest_file):   
                     print("Manifest file does not exist:", manifest_file, file=stderr)
+                    print(f"Parsed from input '{manifest}' -> filename: '{manifest_filename}', manifest ID: {manifest_id}", file=stderr)
                     exit(1)
                 with open(manifest_file, "rb") as f:
                     manifest_data = DepotManifest(f.read())
@@ -107,9 +135,13 @@ if __name__ == "__main__":
                 
                 if (args.compare_manifests):
                     new_chunks = []
-                    new_manifest_file = join(depot_folder, "manifest", str(args.compare_manifests) + ".manif5")
+                    # Parse compare_manifests input to get filename and ID
+                    compare_manifest_filename, compare_manifest_id = parse_manifest_input(args.compare_manifests)
+                    new_manifest_file = join(depot_folder, "manifest", compare_manifest_filename)
+                    
                     if not exists(new_manifest_file):   
                         print("Manifest file does not exist:", new_manifest_file, file=stderr)
+                        print(f"Parsed from input '{args.compare_manifests}' -> filename: '{compare_manifest_filename}', manifest ID: {compare_manifest_id}", file=stderr)
                         exit(1)
                     with open(new_manifest_file, "rb") as f:
                         compare_manifest_data = DepotManifest(f.read())
@@ -182,7 +214,9 @@ if __name__ == "__main__":
                 print("not generating sku.sis: no manifest specified for depot", depot)
             else:
                 sku["sku"]["depots"][len(sku["sku"]["depots"])] = str(depot)
-                sku["sku"]["manifests"][str(depot)] = str(manifest) if args.compare_manifests is None else str(args.compare_manifests)
+                # Use the manifest ID (extracted from filename) for the sku file
+                manifest_for_sku = manifest_id if args.compare_manifests is None else parse_manifest_input(args.compare_manifests)[1]
+                sku["sku"]["manifests"][str(depot)] = str(manifest_for_sku)
         try:
             chunkstore = Chunkstore(args.destdir, depot, is_encrypted=not args.decrypted)    
             chunkstore.pack(chunks)     

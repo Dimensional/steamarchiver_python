@@ -47,7 +47,7 @@ import struct
 if __name__ == "__main__": # exit before we import our shit if the args are wrong
     parser = ArgumentParser(description='Extract downloaded depots.')
     parser.add_argument('depotid', type=int)
-    parser.add_argument('manifestid', type=int)
+    parser.add_argument('manifestfile', type=str, help='Manifest file name (without .manif5 extension) or manifest ID')
     parser.add_argument('depotkey', type=str, nargs='?')
     parser.add_argument('-d', dest="dry_run", help="dry run: verify chunks without extracting", action="store_true")
     parser.add_argument('-f', dest="files", help="List files to extract (can be used multiple times); if ommitted, all files will be extracted. Glob matching supported.", action="append")
@@ -70,7 +70,43 @@ def setup_manifest_and_keys(args):
     manifest_path = join(path, "manifest")
     keyfile = f"./depot/{args.depotid}/{args.depotid}.depotkey"
 
-    with open(join(manifest_path, f"{args.manifestid}.manif5"), "rb") as f:
+    # Parse manifest file and extract manifest ID
+    def parse_manifest_input(manifest_input):
+        """Parse manifest input to get filename and manifest ID"""
+        # Check if it's just a numeric manifest ID (backwards compatibility)
+        try:
+            manifest_id = int(manifest_input)
+            manifest_filename = f"{manifest_id}.manif5"
+            return manifest_filename, manifest_id
+        except ValueError:
+            # It's a filename - extract manifest ID from it
+            manifest_filename = f"{manifest_input}.manif5"
+            
+            # Try to extract manifest ID from filename
+            # For workshop files: {workshop_id}_{name}_{manifest_id}
+            # For standard files: {manifest_id}
+            import re
+            
+            # Look for numeric patterns in the filename
+            numbers = re.findall(r'\d+', manifest_input)
+            if numbers:
+                # For workshop files, manifest ID is typically the last number
+                manifest_id = int(numbers[-1])
+            else:
+                raise ValueError(f"Could not extract manifest ID from filename: {manifest_input}")
+            
+            return manifest_filename, manifest_id
+    
+    manifest_filename, manifest_id = parse_manifest_input(args.manifestfile)
+    args.manifestid = manifest_id  # Add this for compatibility with other parts of the code
+    
+    manifest_file_path = join(manifest_path, manifest_filename)
+    if not exists(manifest_file_path):
+        print(f"ERROR: manifest file not found: {manifest_file_path}")
+        print(f"Parsed from input '{args.manifestfile}' -> filename: '{manifest_filename}', manifest ID: {manifest_id}")
+        exit(1)
+
+    with open(manifest_file_path, "rb") as f:
         manifest = DepotManifest(f.read())
 
     if args.depotkey:

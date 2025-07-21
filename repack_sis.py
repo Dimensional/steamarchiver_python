@@ -6,6 +6,31 @@ from chunkstore import Chunkstore
 import re
 import vdf  # Assuming a VDF library is available for handling VDF files
 
+def parse_manifest_input(manifest_input):
+    """Parse manifest input to get filename and manifest ID"""
+    if manifest_input is None:
+        return None, None
+        
+    # Check if it's just a numeric manifest ID (backwards compatibility)
+    try:
+        manifest_id = int(manifest_input)
+        manifest_filename = f"{manifest_id}.manif5"
+        return manifest_filename, manifest_id
+    except (ValueError, TypeError):
+        # It's a filename - extract manifest ID from it
+        manifest_filename = f"{manifest_input}.manif5"
+        
+        # Try to extract manifest ID from filename
+        import re
+        numbers = re.findall(r'\d+', str(manifest_input))
+        if numbers:
+            # For workshop files, manifest ID is typically the last number
+            manifest_id = int(numbers[-1])
+        else:
+            raise ValueError(f"Could not extract manifest ID from filename: {manifest_input}")
+        
+        return manifest_filename, manifest_id
+
 def get_chunk_files(depot_id, encrypted=True):
     """
     Retrieves all chunk files from the default chunk folder based on the Depot ID.
@@ -60,7 +85,9 @@ def update_sku_sis(chunkstore_folder, chunkstore, manifest=None):
         if manifest is not None:
             # Update only the manifest for the current depot, preserving others
             manifests = sku_data["sku"].get("manifests", {})
-            manifests[str(chunkstore.depot)] = str(manifest)
+            # Extract manifest ID from input for sku file
+            _, manifest_id = parse_manifest_input(manifest)
+            manifests[str(chunkstore.depot)] = str(manifest_id)
             sku_data["sku"]["manifests"] = manifests
         sku_data["sku"]["chunkstores"][str(chunkstore.depot)] = {
             str(index): str(file_size) for index, file_size in chunkstore_info.items()
@@ -191,8 +218,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--manifest",
-        type=int,
-        help="If specified, prints the specific manifest to any existing sku.",
+        type=str,
+        help="If specified, prints the specific manifest to any existing sku (manifest filename without .manif5 extension or manifest ID).",
     )
 
     args = parser.parse_args()
